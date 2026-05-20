@@ -6,5 +6,4 @@ pkg
 coverage
 .ruby-version
 .ruby-gemset
-config
 README
