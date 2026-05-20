@@ -1,0 +1,57 @@
+module Celerbrake
+  # Responsible for sending notices to Celerbrake asynchronously.
+  #
+  # @see SyncSender
+  # @api private
+  # @since v1.0.0
+  class AsyncSender
+    def initialize(method = :post, name = 'async-sender')
+      @config = Celerbrake::Config.instance
+      @sync_sender = SyncSender.new(method)
+      @name = name
+    end
+
+    # Asynchronously sends a notice to Celerbrake.
+    #
+    # @param [Celerbrake::Notice] data Whatever needs to be sent
+    # @param [Celerbrake::Promise] promise
+    # @param [URI] endpoint Where to send +data+
+    # @return [Celerbrake::Promise]
+    def send(data, promise, endpoint = @config.error_endpoint)
+      unless thread_pool << [data, promise, endpoint]
+        return promise.reject(
+          "AsyncSender has reached its capacity of #{@config.queue_size}",
+        )
+      end
+
+      promise
+    end
+
+    # @return [void]
+    def close
+      @sync_sender.close
+      thread_pool.close
+    end
+
+    # @return [Boolean]
+    def closed?
+      thread_pool.closed?
+    end
+
+    # @return [Boolean]
+    def has_workers?
+      thread_pool.has_workers?
+    end
+
+    private
+
+    def thread_pool
+      @thread_pool ||= ThreadPool.new(
+        name: @name,
+        worker_size: @config.workers,
+        queue_size: @config.queue_size,
+        block: proc { |args| @sync_sender.send(*args) },
+      )
+    end
+  end
+end

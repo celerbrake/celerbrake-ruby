@@ -1,0 +1,37 @@
+name: celerbrake-ruby
+
+on: [push]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        ruby: [2.5, 2.6, 2.7, 3.0, 3.1, head, jruby, jruby-head]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Rubocop lint
+        run: if [[ "$RUBY_ENGINE" == "ruby" ]]; then bundle exec rubocop; fi
+
+      - name: YARD lint
+        run: |
+          touch README # Workaround for "incorrect" anchor links in README.md
+          bundle exec yardoc --fail-on-warning --no-progress --readme=README
+
+      - name: Display Ruby version
+        run: ruby -v
+
+      - name: Test
+        run: bundle exec rake
