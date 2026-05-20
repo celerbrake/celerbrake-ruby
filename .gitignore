@@ -1,0 +1,10 @@
+Gemfile.lock
+.bundle
+doc
+.yardoc
+pkg
+coverage
+.ruby-version
+.ruby-gemset
+config
+README

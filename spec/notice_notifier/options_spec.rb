@@ -1,0 +1,269 @@
+RSpec.describe Celerbrake::NoticeNotifier do
+  subject(:notice_notifier) { described_class.new }
+
+  let(:project_id) { 105138 }
+  let(:project_key) { 'fd04e13d806a90f96614ad8e529b2822' }
+  let(:localhost) { 'http://localhost:8080' }
+
+  let(:endpoint) do
+    "https://api.celerbrake.com/api/v3/projects/#{project_id}/notices"
+  end
+
+  let(:params) { {} }
+  let(:ex) { CelerbrakeTestError.new }
+
+  before do
+    stub_request(:post, endpoint).to_return(status: 201, body: '{}')
+
+    Celerbrake::Config.instance = Celerbrake::Config.new(
+      project_id: project_id,
+      project_key: project_key,
+    )
+  end
+
+  describe "options" do
+    describe ":host" do
+      context "when custom" do
+        shared_examples 'endpoint' do |host, endpoint, title|
+          before { Celerbrake::Config.instance.merge(host: host) }
+
+          example(title) do
+            stub_request(:post, endpoint).to_return(status: 201, body: '{}')
+            notice_notifier.notify_sync(ex)
+
+            expect(a_request(:post, endpoint)).to have_been_made.once
+          end
+        end
+
+        path = '/api/v3/projects/105138/notices'
+
+        context "given a full host with port" do
+          include_examples('endpoint', localhost = 'http://localhost:8080',
+                           URI.join(localhost, path),
+                           "sends notices to the specified host's endpoint")
+        end
+
+        context "given a full host" do
+          include_examples('endpoint', localhost = 'http://localhost',
+                           URI.join(localhost, path),
+                           "assumes port 80 by default")
+        end
+
+        context "given a host without scheme" do
+          include_examples 'endpoint', localhost = 'localhost:8080',
+                           URI.join("https://#{localhost}", path),
+                           "assumes https by default"
+        end
+
+        context "given only hostname" do
+          include_examples 'endpoint', localhost = 'localhost',
+                           URI.join("https://#{localhost}", path),
+                           "assumes https and port 80 by default"
+        end
+      end
+    end
+
+    describe ":root_directory" do
+      before do
+        notice_notifier.add_filter(
+          Celerbrake::Filters::RootDirectoryFilter.new('/home/kyrylo/code'),
+        )
+      end
+
+      it "filters out frames" do
+        notice_notifier.notify_sync(ex)
+
+        expect(
+          a_request(:post, endpoint)
+          .with(body: %r|{"file":"/PROJECT_ROOT/celerbrake/ruby/spec/celerbrake_spec.+|),
+        ).to have_been_made.once
+      end
+
+      context "when present and is a" do
+        shared_examples 'root directory' do |dir|
+          before { Celerbrake::Config.instance.merge(root_directory: dir) }
+
+          it "being included into the notice's payload" do
+            notice_notifier.notify_sync(ex)
+            expect(
+              a_request(:post, endpoint)
+              .with(body: %r{"rootDirectory":"/bingo/bango"}),
+            ).to have_been_made.once
+          end
+        end
+
+        context "String" do
+          include_examples 'root directory', '/bingo/bango'
+        end
+
+        context "Pathname" do
+          include_examples 'root directory', Pathname.new('/bingo/bango')
+        end
+      end
+    end
+
+    # rubocop:disable RSpec/MultipleMemoizedHelpers
+    describe ":proxy" do
+      let(:proxy) do
+        WEBrick::HTTPServer.new(
+          Port: 0,
+          Logger: WEBrick::Log.new('/dev/null'),
+          AccessLog: [],
+        )
+      end
+
+      let(:requests) { Queue.new }
+
+      let(:proxy_params) do
+        { host: 'localhost',
+          port: proxy.config[:Port],
+          user: 'user',
+          password: 'password' }
+      end
+
+      before do
+        Celerbrake::Config.instance.merge(
+          proxy: proxy_params,
+          host: "http://localhost:#{proxy.config[:Port]}",
+        )
+
+        proxy.mount_proc '/' do |req, res|
+          requests << req
+          res.status = 201
+          res.body = "OK\n"
+        end
+
+        Thread.new { proxy.start }
+      end
+
+      after { proxy.stop }
+
+      it "is being used if configured" do
+        if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("2.6.0")
+          skip(
+            "We use Webmock 2, which doesn't support Ruby 2.6+. It's " \
+            "safe to run this test on 2.6+ once we upgrade to Webmock 3.5+",
+          )
+        end
+        notice_notifier.notify_sync(ex)
+
+        proxied_request = requests.pop(true)
+
+        expect(proxied_request.header['proxy-authorization'].first)
+          .to eq('Basic dXNlcjpwYXNzd29yZA==')
+
+        # rubocop:disable Layout/LineLength
+        expect(proxied_request.request_line)
+          .to eq("POST http://localhost:#{proxy.config[:Port]}/api/v3/projects/105138/notices HTTP/1.1\r\n")
+        # rubocop:enable Layout/LineLength
+      end
+    end
+    # rubocop:enable RSpec/MultipleMemoizedHelpers
+
+    describe ":environment" do
+      context "when present" do
+        before { Celerbrake::Config.instance.merge(environment: :production) }
+
+        it "being included into the notice's payload" do
+          notice_notifier.notify_sync(ex)
+          expect(
+            a_request(:post, endpoint)
+            .with(body: /"context":{.*"environment":"production".*}/),
+          ).to have_been_made.once
+        end
+      end
+    end
+
+    describe ":ignore_environments" do
+      shared_examples 'sent notice' do |params|
+        before { Celerbrake::Config.instance.merge(params) }
+
+        it "sends a notice" do
+          notice_notifier.notify_sync(ex)
+          expect(a_request(:post, endpoint)).to have_been_made
+        end
+      end
+
+      shared_examples 'ignored notice' do |params|
+        before { Celerbrake::Config.instance.merge(params) }
+
+        it "ignores exceptions occurring in envs that were not configured" do
+          notice_notifier.notify_sync(ex)
+          expect(a_request(:post, endpoint)).not_to have_been_made
+        end
+      end
+
+      context "when env is set and ignore_environments doesn't mention it" do
+        params = {
+          environment: :development,
+          ignore_environments: [:production],
+        }
+
+        include_examples 'sent notice', params
+      end
+
+      context "when the current env and notify envs are the same" do
+        params = {
+          environment: :development,
+          ignore_environments: %i[production development],
+        }
+
+        include_examples 'ignored notice', params
+
+        it "returns early and doesn't try to parse the given exception" do
+          allow(Celerbrake::Notice).to receive(:new)
+
+          expect(notice_notifier.notify_sync(ex))
+            .to eq('error' => "current environment 'development' is ignored")
+
+          expect(Celerbrake::Notice).not_to have_received(:new)
+        end
+
+        it "doesn't make an HTTP request" do
+          expect(a_request(:post, endpoint)).not_to have_been_made
+        end
+      end
+
+      context "when the current env is not set and notify envs are present" do
+        params = { ignore_environments: %i[production development] }
+
+        include_examples 'sent notice', params
+      end
+
+      context "when the current env is set and notify envs aren't" do
+        include_examples 'sent notice', environment: :development
+      end
+
+      context "when ignore_environments specifies a Regexp pattern" do
+        params = {
+          environment: :testing,
+          ignore_environments: ['staging', /test.+/],
+        }
+
+        include_examples 'ignored notice', params
+      end
+    end
+
+    describe ":blocklist_keys" do
+      # Fixes https://github.com/celerbrake/celerbrake-ruby/issues/276
+      context "when specified along with :allowlist_keys" do
+        context "and when context payload is present" do
+          before do
+            Celerbrake::Config.instance.merge(
+              blocklist_keys: %i[password password_confirmation],
+              allowlist_keys: [:email, /user/i, 'account_id'],
+            )
+          end
+
+          it "sends a notice" do
+            notice = notice_notifier.build_notice(ex)
+            notice[:context][:headers] = 'banana'
+            notice_notifier.notify_sync(notice)
+
+            expect(a_request(:post, endpoint)).to have_been_made
+          end
+        end
+      end
+    end
+  end
+end
