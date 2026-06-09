@@ -34,7 +34,7 @@ DESC
   if defined?(JRuby)
     s.add_dependency 'rbtree-jruby', '~> 0.2'
   else
-    s.add_dependency 'rbtree3', '~> 0.6'
+    s.add_dependency 'rbtree3', '>= 0.6', '< 2.0'
   end
 
   # base64 and logger left the default gem set in Ruby 3.4; declare them so the
