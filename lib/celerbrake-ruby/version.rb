@@ -3,7 +3,7 @@
 module Celerbrake
   # @return [String] the library version
   # @api public
-  CELERBRAKE_RUBY_VERSION = '0.1.0'.freeze
+  CELERBRAKE_RUBY_VERSION = '0.2.0'.freeze
 
   # @return [Hash{Symbol=>String}] the information about the notifier library
   # @since v5.0.0

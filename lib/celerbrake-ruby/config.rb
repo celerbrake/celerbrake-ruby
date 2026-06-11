@@ -175,7 +175,14 @@ module Celerbrake
       )
 
       self.versions = {}
-      self.performance_stats = true
+      # OFF by default (a deliberate departure from airbrake-ruby): Celerbrake
+      # serves no v5 APM endpoints — app performance telemetry flows through
+      # OpenTelemetry + celerbrake-agent instead. With this on, every process
+      # POSTed route/query stats to apm_host every 15s; left at the airbrake
+      # default that meant a failing request per flush (a DNS timeout + an
+      # errored trace span) for nothing. query_stats/job_stats stay true but
+      # are inert without this master switch.
+      self.performance_stats = false
       self.performance_stats_flush_period = 15
       self.query_stats = true
       self.job_stats = true
@@ -267,17 +274,19 @@ module Celerbrake
       end
     end
 
-    HOST_DEPRECATION_MSG = "**Celerbrake: the 'host' option is deprecated. Use " \
-      "'error_host' instead".freeze
-
+    # `host` is the BLESSED single-host option for Celerbrake (a departure from
+    # airbrake-ruby, which deprecated it in favour of split error/apm hosts):
+    # a Celerbrake instance is one host, so `c.host = ...` configures BOTH.
+    # Before this, `host=` only set error_host — apm_host silently kept its
+    # unreachable default, and any enabled APM sender posted into a DNS error
+    # every 15 seconds (found by Celerbrake's own trace grouping on prod).
     def host
-      logger.warn(HOST_DEPRECATION_MSG)
       @error_host
     end
 
     def host=(value)
-      logger.warn(HOST_DEPRECATION_MSG)
       @error_host = value
+      @apm_host = value
     end
 
     private

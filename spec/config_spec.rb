@@ -23,7 +23,10 @@ RSpec.describe Celerbrake::Config do
   its(:timeout) { is_expected.to be_nil }
   its(:blocklist_keys) { is_expected.to be_empty }
   its(:allowlist_keys) { is_expected.to be_empty }
-  its(:performance_stats) { is_expected.to be(true) }
+  # Off by default: Celerbrake serves no v5 APM endpoints (OTel + the agent
+  # carry performance telemetry); the airbrake-inherited true default posted
+  # to an unreachable apm_host every 15s.
+  its(:performance_stats) { is_expected.to be(false) }
   its(:performance_stats_flush_period) { is_expected.to eq(15) }
   its(:query_stats) { is_expected.to be(true) }
   its(:job_stats) { is_expected.to be(true) }
@@ -151,7 +154,9 @@ RSpec.describe Celerbrake::Config do
     end
 
     context "when query stats are disabled" do
-      before { config.query_stats = false }
+      # performance_stats now defaults false (master switch) — enable it so the
+      # query-stats check is what rejects.
+      before { config.performance_stats = true; config.query_stats = false }
 
       let(:metric) do
         Celerbrake::Query.new(method: 'GET', route: '/foo', query: '', timing: 1)
@@ -166,7 +171,7 @@ RSpec.describe Celerbrake::Config do
     end
 
     context "when job stats are disabled" do
-      before { config.job_stats = false }
+      before { config.performance_stats = true; config.job_stats = false }
 
       let(:metric) do
         Celerbrake::Queue.new(queue: 'foo_queue', error_count: 0, timing: 1)
@@ -188,38 +193,27 @@ RSpec.describe Celerbrake::Config do
   end
 
   describe "#host" do
-    let(:output) { StringIO.new }
-
-    before { config.logger = Logger.new(output) }
-
-    it "prints a deprecation warning" do
-      expect { config.host }
-        .to change(output, :string)
-        .from('')
-        .to(/the 'host' option is deprecated/)
-    end
-
-    it "returns error host" do
+    it "returns error host, without any deprecation warning" do
+      output = StringIO.new
+      config.logger = Logger.new(output)
       config.error_host = 'http://whatever'
       expect(config.host).to eq('http://whatever')
+      expect(output.string).to eq('')
     end
   end
 
   describe "#host=" do
-    let(:output) { StringIO.new }
-
-    before { config.logger = Logger.new(output) }
-
-    it "prints a deprecation warning" do
-      expect { config.host = 'http://whatever' }
-        .to change(output, :string)
-        .from('')
-        .to(/the 'host' option is deprecated/)
-    end
-
-    it "sets error host" do
+    it "sets BOTH error_host and apm_host (one Celerbrake instance = one host)" do
       config.host = 'http://whatever'
       expect(config.error_host).to eq('http://whatever')
+      expect(config.apm_host).to eq('http://whatever')
+    end
+
+    it "does not print a deprecation warning (host is the blessed option here)" do
+      output = StringIO.new
+      config.logger = Logger.new(output)
+      config.host = 'http://whatever'
+      expect(output.string).to eq('')
     end
   end
 end
