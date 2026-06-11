@@ -90,7 +90,8 @@ RSpec.describe Celerbrake::NestedException do
       JSON.parse(Marshal.dump(Time.now))
     rescue JSON::ParserError => e
       exceptions = described_class.new(e).as_json
-      expect(exceptions.first[:message]).to match('unexpected token at')
+      # json < 2.19 says "unexpected token at"; >= 2.19 says "unexpected character: … at".
+        expect(exceptions.first[:message]).to match(/unexpected (token|character)/)
     else
       raise 'expected JSON.parse to raise JSON::ParserError but nothing was raised'
     end

@@ -6,9 +6,12 @@ RSpec.describe Celerbrake::MonotonicTime do
       expect(monotonic_time.time_in_ms).to be_a(Float)
     end
 
-    it "always returns time in the future" do
+    it "never goes backwards" do
+      # Two consecutive reads can be EQUAL at clock resolution on a fast
+      # machine — monotonic means non-decreasing, not strictly increasing
+      # (this was a real intermittent failure).
       old_time = monotonic_time.time_in_ms
-      expect(monotonic_time.time_in_ms).to be > old_time
+      expect(monotonic_time.time_in_ms).to be >= old_time
     end
   end
 
@@ -17,9 +20,9 @@ RSpec.describe Celerbrake::MonotonicTime do
       expect(monotonic_time.time_in_s).to be_a(Float)
     end
 
-    it "always returns time in the future" do
+    it "never goes backwards" do
       old_time = monotonic_time.time_in_s
-      expect(monotonic_time.time_in_s).to be > old_time
+      expect(monotonic_time.time_in_s).to be >= old_time
     end
   end
 end

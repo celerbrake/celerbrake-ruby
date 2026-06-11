@@ -51,8 +51,11 @@ RSpec.describe Celerbrake::Filters::GitRepositoryFilter do
   context "when .git directory exists" do
     it "attaches context/repository" do
       git_repository_filter.call(notice)
+      # The remote can be https (github.com/celerbrake/…) or ssh
+      # (git@github.com:celerbrake/…) depending on how the repo was cloned —
+      # the filter passes it through as-is; accept both.
       expect(notice[:context][:repository]).to match(
-        'github.com/celerbrake/celerbrake-ruby',
+        %r{github\.com[:/]celerbrake/celerbrake-ruby},
       )
     end
   end
