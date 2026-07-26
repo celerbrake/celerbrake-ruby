@@ -42,6 +42,17 @@ module Celerbrake
     # @return [Integer] HTTP code returned when an IP sends over 10k/min notices
     TOO_MANY_REQUESTS = 429
 
+    # @return [Integer] the backoff (in seconds) applied to a 429 that carries
+    #   no usable header, or a header we refuse to trust
+    # @see RateLimit::DEFAULT_DELAY
+    DEFAULT_RATE_LIMIT_DELAY = RateLimit::DEFAULT_DELAY
+
+    # @return [Integer] the longest backoff (in seconds) honored from a 429,
+    #   no matter what the response asks for. An unbounded Retry-After from
+    #   any intermediary would otherwise silence an app's reporting for hours.
+    # @see RateLimit::MAX_DELAY
+    MAX_RATE_LIMIT_DELAY = RateLimit::MAX_DELAY
+
     # @return [Integer] HTTP code returned when the server encountered an
     #   unexpected condition that prevented it from fulfilling the request
     # @since v6.2.0
@@ -85,8 +96,17 @@ module Celerbrake
           logger.error("#{LOG_LABEL} #{parsed_body['message']}")
           parsed_body.merge('code' => code, 'error' => parsed_body['message'])
         when TOO_MANY_REQUESTS
-          parsed_body = JSON.parse(body)
-          msg = "#{LOG_LABEL} #{parsed_body['message']}"
+          # A 429 body isn't guaranteed to be JSON (rack throttles often send
+          # plain text). Parse defensively: a malformed body must never cost
+          # us the 'rate_limit_reset' key, or the client hot-retries a server
+          # that is telling it to slow down.
+          message =
+            begin
+              JSON.parse(body)['message']
+            rescue StandardError
+              truncated_body(body)
+            end
+          msg = "#{LOG_LABEL} #{message}"
           logger.error(msg)
           {
             'code' => code,
@@ -117,8 +137,11 @@ module Celerbrake
     end
     private_class_method :truncated_body
 
+    # @param [Net::HTTPResponse] response
+    # @return [Time] when the client may send to this endpoint again. The
+    #   delay is bounded and never negative — see {RateLimit.delay_for}.
     def self.rate_limit_reset(response)
-      Time.now + response['X-RateLimit-Delay'].to_i
+      Time.now + RateLimit.delay_for(response)
     end
     private_class_method :rate_limit_reset
   end

@@ -68,8 +68,15 @@ module Celerbrake
     # @api public
     attr_accessor :ignore_environments
 
-    # @return [Integer] The HTTP timeout in seconds.
+    # @return [Integer] The HTTP timeout in seconds. When set, it overrides
+    #   the open, read and write timeouts at once. When +nil+ (the default),
+    #   the per-phase defaults below apply — a notifier must never inherit
+    #   Net::HTTP's 60-second defaults, because a single stuck worker thread
+    #   plus a full queue would blackhole every subsequent notice.
     # @api public
+    # @see #open_timeout
+    # @see #read_timeout
+    # @see #write_timeout
     attr_accessor :timeout
 
     # @return [Array<String, Symbol, Regexp>] the keys, which should be
@@ -137,6 +144,18 @@ module Celerbrake
     # @api public
     # @since v6.2.0
     attr_accessor :backlog
+
+    # @return [Integer] the default connection-open timeout (seconds) applied
+    #   when +timeout+ is not configured
+    DEFAULT_OPEN_TIMEOUT = 2
+
+    # @return [Integer] the default read timeout (seconds) applied when
+    #   +timeout+ is not configured
+    DEFAULT_READ_TIMEOUT = 5
+
+    # @return [Integer] the default write timeout (seconds) applied when
+    #   +timeout+ is not configured
+    DEFAULT_WRITE_TIMEOUT = 5
 
     class << self
       # @return [Config]
@@ -272,6 +291,27 @@ module Celerbrake
       else
         promise
       end
+    end
+
+    # @return [Integer] the effective connection-open timeout in seconds:
+    #   +timeout+ when configured, DEFAULT_OPEN_TIMEOUT otherwise
+    # @see DEFAULT_OPEN_TIMEOUT
+    def open_timeout
+      timeout || DEFAULT_OPEN_TIMEOUT
+    end
+
+    # @return [Integer] the effective read timeout in seconds: +timeout+ when
+    #   configured, DEFAULT_READ_TIMEOUT otherwise
+    # @see DEFAULT_READ_TIMEOUT
+    def read_timeout
+      timeout || DEFAULT_READ_TIMEOUT
+    end
+
+    # @return [Integer] the effective write timeout in seconds: +timeout+ when
+    #   configured, DEFAULT_WRITE_TIMEOUT otherwise
+    # @see DEFAULT_WRITE_TIMEOUT
+    def write_timeout
+      timeout || DEFAULT_WRITE_TIMEOUT
     end
 
     # `host` is the BLESSED single-host option for Celerbrake (a departure from

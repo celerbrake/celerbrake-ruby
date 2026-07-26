@@ -90,6 +90,9 @@ RSpec.describe Celerbrake::RemoteSettings do
       before do
         allow(Net::HTTP).to receive(:new).and_return(https)
         allow(https).to receive(:use_ssl=).with(true)
+        allow(https).to receive(:open_timeout=)
+        allow(https).to receive(:read_timeout=)
+        allow(https).to receive(:write_timeout=)
         allow(https).to receive(:request).and_raise(StandardError)
       end
 
@@ -197,5 +200,45 @@ RSpec.describe Celerbrake::RemoteSettings do
       end
     end
     # rubocop:enable RSpec/MultipleMemoizedHelpers
+  end
+
+  # DEFECT B regression: the remote-settings poller shares the HTTP path
+  # policy with the senders — it must never inherit Net::HTTP's 60-second
+  # defaults either.
+  describe "#build_https" do
+    before do
+      Celerbrake::Config.instance = Celerbrake::Config.new(
+        project_id: project_id, project_key: 'banana',
+      )
+    end
+
+    def build_https
+      described_class.new(project_id, host)
+        .__send__(:build_https, URI(host))
+    end
+
+    context "when config.timeout is unset (the default)" do
+      # rubocop:disable RSpec/MultipleExpectations
+      it "applies the default open/read/write timeouts" do
+        https = build_https
+        expect(https.open_timeout).to eq(Celerbrake::Config::DEFAULT_OPEN_TIMEOUT)
+        expect(https.read_timeout).to eq(Celerbrake::Config::DEFAULT_READ_TIMEOUT)
+        expect(https.write_timeout).to eq(Celerbrake::Config::DEFAULT_WRITE_TIMEOUT)
+      end
+      # rubocop:enable RSpec/MultipleExpectations
+    end
+
+    context "when config.timeout is set" do
+      before { Celerbrake::Config.instance.timeout = 21 }
+
+      # rubocop:disable RSpec/MultipleExpectations
+      it "applies it to the open/read/write timeouts" do
+        https = build_https
+        expect(https.open_timeout).to eq(21)
+        expect(https.read_timeout).to eq(21)
+        expect(https.write_timeout).to eq(21)
+      end
+      # rubocop:enable RSpec/MultipleExpectations
+    end
   end
 end
