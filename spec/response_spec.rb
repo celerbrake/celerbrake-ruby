@@ -48,15 +48,89 @@ RSpec.describe Celerbrake::Response do
         )
       end
 
-      it "returns an error response" do
+      it "returns an error response with a fallback backoff delay" do
         time = Time.now
         allow(Time).to receive(:now).and_return(time)
 
         resp = described_class.parse(response)
         expect(resp).to include(
           'error' => '**Celerbrake: rate limited',
-          'rate_limit_reset' => time,
+          # No Retry-After and no X-RateLimit-Delay: a 429 must still result
+          # in a backoff, never a hot-retry on the next notice.
+          'rate_limit_reset' => time + described_class::DEFAULT_RATE_LIMIT_DELAY,
         )
+      end
+
+      context "with a Retry-After header in delta-seconds" do
+        let(:response) do
+          OpenStruct.new(
+            code: 429, body: '{"message":"rate limited"}', 'Retry-After' => '7'
+          )
+        end
+
+        it "honors Retry-After" do
+          time = Time.now
+          allow(Time).to receive(:now).and_return(time)
+
+          resp = described_class.parse(response)
+          expect(resp).to include('rate_limit_reset' => time + 7)
+        end
+      end
+
+      context "with a Retry-After header as an HTTP-date" do
+        let(:time) { Time.now }
+        let(:response) do
+          OpenStruct.new(
+            code: 429,
+            body: '{"message":"rate limited"}',
+            'Retry-After' => (time + 120).utc.httpdate,
+          )
+        end
+
+        it "honors Retry-After" do
+          allow(Time).to receive(:now).and_return(time)
+
+          resp = described_class.parse(response)
+          expect(resp['rate_limit_reset']).to be_within(2).of(time + 120)
+        end
+      end
+
+      context "with a legacy X-RateLimit-Delay header" do
+        let(:response) do
+          OpenStruct.new(
+            code: 429, body: '{"message":"rate limited"}', 'X-RateLimit-Delay' => '3'
+          )
+        end
+
+        it "honors X-RateLimit-Delay" do
+          time = Time.now
+          allow(Time).to receive(:now).and_return(time)
+
+          resp = described_class.parse(response)
+          expect(resp).to include('rate_limit_reset' => time + 3)
+        end
+      end
+
+      # DEFECT B regression (backoff half): 429 bodies aren't guaranteed to
+      # be JSON (rack throttles send plain text). The old implementation let
+      # JSON::ParserError fall into the generic rescue, which dropped the
+      # 'rate_limit_reset' key — so the client hot-retried a server that was
+      # telling it to slow down.
+      context "with a non-JSON body" do
+        let(:response) do
+          OpenStruct.new(code: 429, body: 'Too Many Requests', 'Retry-After' => '30')
+        end
+
+        # rubocop:disable RSpec/MultipleExpectations
+        it "still returns a rate_limit_reset so the client backs off" do
+          time = Time.now
+          allow(Time).to receive(:now).and_return(time)
+
+          resp = described_class.parse(response)
+          expect(resp['rate_limit_reset']).to eq(time + 30)
+          expect(resp['error']).to match(/Too Many Requests/)
+        end
+        # rubocop:enable RSpec/MultipleExpectations
       end
     end
 

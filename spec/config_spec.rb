@@ -21,6 +21,12 @@ RSpec.describe Celerbrake::Config do
   its(:environment) { is_expected.to be_nil }
   its(:ignore_environments) { is_expected.to be_empty }
   its(:timeout) { is_expected.to be_nil }
+  # DEFECT B regression: with `timeout` unset the notifier must still bound
+  # every HTTP call — Net::HTTP's 60s defaults let one unreachable server pin
+  # the single worker per notice while the queue blackholes everything else.
+  its(:open_timeout) { is_expected.to eq(described_class::DEFAULT_OPEN_TIMEOUT) }
+  its(:read_timeout) { is_expected.to eq(described_class::DEFAULT_READ_TIMEOUT) }
+  its(:write_timeout) { is_expected.to eq(described_class::DEFAULT_WRITE_TIMEOUT) }
   its(:blocklist_keys) { is_expected.to be_empty }
   its(:allowlist_keys) { is_expected.to be_empty }
   # Off by default: Celerbrake serves no v5 APM endpoints (OTel + the agent
@@ -44,6 +50,14 @@ RSpec.describe Celerbrake::Config do
 
       its(:logger) { is_expected.to be_a(StringIO) }
     end
+  end
+
+  context "when the timeout option is configured" do
+    before { config.timeout = 9 }
+
+    its(:open_timeout) { is_expected.to eq(9) }
+    its(:read_timeout) { is_expected.to eq(9) }
+    its(:write_timeout) { is_expected.to eq(9) }
   end
 
   describe "#valid?" do

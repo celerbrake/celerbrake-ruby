@@ -74,9 +74,13 @@ module Celerbrake
     def build_https(uri)
       Net::HTTP.new(uri.host, uri.port, *proxy_params).tap do |https|
         https.use_ssl = uri.is_a?(URI::HTTPS)
-        if @config.timeout
-          https.open_timeout = @config.timeout
-          https.read_timeout = @config.timeout
+        # Always bound the request: Net::HTTP's 60s defaults would let an
+        # unreachable server pin the single worker thread per notice while
+        # the queue blackholes everything behind it.
+        https.open_timeout = @config.open_timeout
+        https.read_timeout = @config.read_timeout
+        if https.respond_to?(:write_timeout=) # Ruby >= 2.6
+          https.write_timeout = @config.write_timeout
         end
       end
     end
