@@ -184,6 +184,147 @@ RSpec.describe Celerbrake::SyncSender do
       # rubocop:enable RSpec/MultipleExpectations
     end
 
+    # BLOCKER regression (observable suppression): while a 429 backoff is in
+    # effect the sender drops every payload. Silent drops are undetectable —
+    # an operator (or an agent triaging "why did this app go quiet?") must be
+    # able to see that reporting is suppressed and until when.
+    context "when a 429 suppresses the sender" do
+      let(:endpoint) { %r{https://api.celerbrake.com/api/v3/projects/1/notices} }
+
+      before do
+        stub_request(:post, endpoint).to_return(
+          status: 429,
+          body: 'Too Many Requests',
+          # A hostile/misconfigured intermediary asking for a full day off.
+          headers: { 'Retry-After' => '86400' },
+        )
+        allow(mock_backlog).to receive(:<<)
+      end
+
+      # rubocop:disable RSpec/MultipleExpectations
+      it "exposes the (clamped) suppression window" do
+        sync_sender.send({}, Celerbrake::Promise.new)
+
+        expect(sync_sender).to be_rate_limited
+        expect(sync_sender.rate_limit_reset).to be_within(5).of(
+          Time.now + Celerbrake::Response::MAX_RATE_LIMIT_DELAY,
+        )
+      end
+      # rubocop:enable RSpec/MultipleExpectations
+
+      it "counts the payloads it drops while suppressed" do
+        3.times { sync_sender.send({}, Celerbrake::Promise.new) }
+
+        # The first send made the HTTP request that triggered the 429; the
+        # other two were dropped without touching the network.
+        expect(sync_sender.rate_limited_drops).to eq(2)
+      end
+
+      it "logs the suppression window once it starts dropping" do
+        allow(Celerbrake::Loggable.instance).to receive(:warn)
+
+        2.times { sync_sender.send({}, Celerbrake::Promise.new) }
+
+        expect(Celerbrake::Loggable.instance).to have_received(:warn).with(
+          /suppressing sends .+ until/,
+        ).at_least(:once)
+      end
+
+      it "throttles the suppression log under a storm of drops" do
+        allow(Celerbrake::Loggable.instance).to receive(:warn)
+
+        50.times { sync_sender.send({}, Celerbrake::Promise.new) }
+
+        # 49 drops, one line: a notice storm must not become a log storm.
+        expect(Celerbrake::Loggable.instance)
+          .to have_received(:warn).with(/dropped \d+ payload/).once
+      end
+    end
+
+    # The suppression bookkeeping added a lock to the send path, which is
+    # reached from every worker thread (and from notify_sync on a host request
+    # thread). It must stay a counter bump: no deadlock, no serialization,
+    # and every drop accounted for.
+    context "when many threads send while suppressed" do
+      let(:endpoint) { %r{https://api.celerbrake.com/api/v3/projects/1/notices} }
+
+      before do
+        stub_request(:post, endpoint).to_return(
+          status: 429, body: 'Too Many Requests', headers: { 'Retry-After' => '600' },
+        )
+        allow(mock_backlog).to receive(:<<)
+      end
+
+      # rubocop:disable RSpec/MultipleExpectations
+      it "never blocks a caller and counts every drop" do
+        sync_sender.send({}, Celerbrake::Promise.new) # arm the suppression
+
+        senders = Array.new(8) do
+          Thread.new { 50.times { sync_sender.send({}, Celerbrake::Promise.new) } }
+        end
+
+        begin
+          senders.each { |thread| expect(thread.join(5)).to eq(thread) }
+          expect(sync_sender.rate_limited_drops).to eq(8 * 50)
+        ensure
+          senders.each { |thread| thread.kill unless thread.join(0) }
+        end
+      end
+      # rubocop:enable RSpec/MultipleExpectations
+    end
+
+    context "when the suppression window expires" do
+      let(:endpoint) { %r{https://api.celerbrake.com/api/v3/projects/1/notices} }
+
+      before do
+        stub_request(:post, endpoint).to_return(
+          status: 429, body: 'Too Many Requests', headers: { 'Retry-After' => '1' },
+        )
+        allow(mock_backlog).to receive(:<<)
+      end
+
+      # rubocop:disable RSpec/MultipleExpectations
+      it "clears the suppressed state at the expected time" do
+        sync_sender.send({}, Celerbrake::Promise.new)
+        expect(sync_sender).to be_rate_limited
+
+        sleep 1.1
+        expect(sync_sender).not_to be_rate_limited
+      end
+      # rubocop:enable RSpec/MultipleExpectations
+    end
+
+    # The reviewer's related concern: a blanket backoff on a header-less 429
+    # pauses ALL sends through that sender. The gate is per-sender (errors,
+    # performance and deploys each own one) AND now per-endpoint, so a 429
+    # minted for one destination cannot silence the others.
+    context "when one endpoint rate limits" do
+      let(:routes_url) do
+        'https://api.celerbrake.com/api/v5/projects/1/routes-stats'
+      end
+      let(:queries_url) do
+        'https://api.celerbrake.com/api/v5/projects/1/queries-stats'
+      end
+
+      before do
+        stub_request(:post, routes_url).to_return(
+          status: 429, body: 'Too Many Requests', headers: { 'Retry-After' => '600' },
+        )
+        stub_request(:post, queries_url).to_return(body: '{}')
+        allow(mock_backlog).to receive(:<<)
+      end
+
+      # rubocop:disable RSpec/MultipleExpectations
+      it "doesn't suppress sends to other endpoints" do
+        sync_sender.send({}, Celerbrake::Promise.new, URI(routes_url))
+        sync_sender.send({}, Celerbrake::Promise.new, URI(queries_url))
+
+        expect(a_request(:post, queries_url)).to have_been_made.once
+        expect(sync_sender.rate_limited?(URI(routes_url))).to be(true)
+      end
+      # rubocop:enable RSpec/MultipleExpectations
+    end
+
     context "when the provided method is :put" do
       before { stub_request(:put, endpoint).to_return(status: 200, body: '') }
 

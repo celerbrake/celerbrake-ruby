@@ -24,6 +24,23 @@ Celerbrake Ruby Changelog
   `X-RateLimit-Delay`, then falls back to 60s — and a non-JSON 429 body no
   longer defeats the backoff (it used to drop the `rate_limit_reset` key and
   hot-retry a server that was shedding load).
+- **...but the honored backoff is clamped to 15 minutes.** A 429 can be minted
+  by any intermediary (proxy, WAF, CDN, misconfigured load balancer), so an
+  unbounded `Retry-After` was a way for anything on the path to silence an
+  app's error reporting for hours or days while its operator believed it was
+  reporting. The notifier now honors at most `Response::MAX_RATE_LIMIT_DELAY`
+  (900s — Celerbrake rate limits per minute, so every legitimate relief window
+  is minute-scale) and substitutes `DEFAULT_RATE_LIMIT_DELAY` (60s) for any
+  value it will not trust: malformed, negative, oversized, or an HTTP-date in
+  the past. No honored backoff can be negative or unbounded.
+- **Rate-limit suppression is observable and no longer sender-wide.** The new
+  `Celerbrake::RateLimit` (which owns the whole backoff policy) tracks the
+  window per endpoint, so a 429 for one destination no longer pauses the
+  others. It counts what the sender drops while suppressed, and logs
+  one throttled line per 10s naming the endpoint and the time sends resume.
+  `SyncSender#rate_limited?`, `#rate_limit_reset` and `#rate_limited_drops`
+  expose the state, so an operator or agent can tell that reporting is paused
+  instead of guessing why an app went quiet.
 
 ### [v0.1.0][v0.1.0] (unreleased)
 

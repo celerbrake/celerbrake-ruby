@@ -42,11 +42,16 @@ module Celerbrake
     # @return [Integer] HTTP code returned when an IP sends over 10k/min notices
     TOO_MANY_REQUESTS = 429
 
-    # @return [Integer] how long (in seconds) to back off after a 429 that
-    #   carries neither a Retry-After nor an X-RateLimit-Delay header. Without
-    #   a fallback the client would hot-retry a rate-limiting server on every
-    #   notice.
-    DEFAULT_RATE_LIMIT_DELAY = 60
+    # @return [Integer] the backoff (in seconds) applied to a 429 that carries
+    #   no usable header, or a header we refuse to trust
+    # @see RateLimit::DEFAULT_DELAY
+    DEFAULT_RATE_LIMIT_DELAY = RateLimit::DEFAULT_DELAY
+
+    # @return [Integer] the longest backoff (in seconds) honored from a 429,
+    #   no matter what the response asks for. An unbounded Retry-After from
+    #   any intermediary would otherwise silence an app's reporting for hours.
+    # @see RateLimit::MAX_DELAY
+    MAX_RATE_LIMIT_DELAY = RateLimit::MAX_DELAY
 
     # @return [Integer] HTTP code returned when the server encountered an
     #   unexpected condition that prevented it from fulfilling the request
@@ -132,40 +137,12 @@ module Celerbrake
     end
     private_class_method :truncated_body
 
+    # @param [Net::HTTPResponse] response
+    # @return [Time] when the client may send to this endpoint again. The
+    #   delay is bounded and never negative — see {RateLimit.delay_for}.
     def self.rate_limit_reset(response)
-      Time.now + rate_limit_delay(response)
+      Time.now + RateLimit.delay_for(response)
     end
     private_class_method :rate_limit_reset
-
-    # Computes the backoff delay for a 429. Prefers the standard Retry-After
-    # header (delta-seconds or HTTP-date), then the legacy Airbrake
-    # X-RateLimit-Delay header, then DEFAULT_RATE_LIMIT_DELAY, so that a 429
-    # always results in a backoff.
-    #
-    # @param [Net::HTTPResponse] response
-    # @return [Numeric] the delay in seconds (always positive)
-    def self.rate_limit_delay(response)
-      retry_after = response['Retry-After']
-      if retry_after
-        stripped = retry_after.strip
-        if /\A\d+\z/.match?(stripped)
-          seconds = stripped.to_i
-          return seconds if seconds > 0
-        end
-
-        begin
-          delay = Time.httpdate(stripped) - Time.now
-          return delay if delay > 0
-        rescue ArgumentError
-          nil # Fall through to the legacy header.
-        end
-      end
-
-      legacy_delay = response['X-RateLimit-Delay'].to_i
-      return legacy_delay if legacy_delay > 0
-
-      DEFAULT_RATE_LIMIT_DELAY
-    end
-    private_class_method :rate_limit_delay
   end
 end

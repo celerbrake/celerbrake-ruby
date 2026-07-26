@@ -150,6 +150,53 @@ RSpec.describe Celerbrake::ThreadPool do
         end
       end
     end
+
+    # The reviewer's own probe, kept as a standing guarantee so the
+    # rate-limit/observability work can never regress it: 32 threads x 200
+    # messages at a permanently full queue while the single worker is parked
+    # inside a hanging HTTP call. Every push returns immediately, every
+    # overflow is counted, and has_workers? (the liveness check every notify
+    # goes through) stays responsive throughout.
+    context "when 32 threads storm a permanently full queue" do
+      # rubocop:disable RSpec/MultipleExpectations, RSpec/ExampleLength
+      it "never blocks, counts every drop and keeps has_workers? responsive" do
+        started = Queue.new
+        gate = Queue.new
+        pool = described_class.new(
+          worker_size: 1,
+          queue_size: 1,
+          block: proc { |message| started << message; gate.pop },
+        )
+
+        pool << :parked
+        started.pop # the worker is now parked inside the "HTTP call"
+        expect(pool << :filler).to be(true) # the queue is now genuinely full
+
+        timings = Queue.new
+        pushers = Array.new(32) do
+          Thread.new do
+            start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            200.times { pool << :storm }
+            timings << Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
+          end
+        end
+        liveness = Thread.new { pool.has_workers? }
+
+        begin
+          pushers.each { |thread| expect(thread.join(5)).to eq(thread) }
+          32.times { expect(timings.pop).to be < 1 }
+          expect(pool.dropped_count).to eq(32 * 200)
+
+          expect(liveness.join(2)).to eq(liveness) # nil join == wedged
+          expect(liveness.value).to be(true)
+        ensure
+          ([liveness] + pushers).each { |thread| thread.kill unless thread.join(0) }
+          3.times { gate << :go }
+          pool.close
+        end
+      end
+      # rubocop:enable RSpec/MultipleExpectations, RSpec/ExampleLength
+    end
   end
 
   describe "#backlog" do

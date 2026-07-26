@@ -29,7 +29,11 @@ module Celerbrake
     def initialize(method = :post)
       @config = Celerbrake::Config.instance
       @method = method
-      @rate_limit_reset = Time.now
+      # Rate limiting is tracked per endpoint (and this sender is already
+      # per-notifier: errors, performance and deploys own separate senders).
+      # A 429 minted for one destination — possibly by an intermediary that
+      # knows nothing about the others — must not silence the rest.
+      @rate_limit = RateLimit.new
       @backlog = Backlog.new(self) if @config.backlog
     end
 
@@ -39,7 +43,7 @@ module Celerbrake
     # @param [URI::HTTPS] endpoint
     # @return [Hash{String=>String}] the parsed HTTP response
     def send(data, promise, endpoint = @config.error_endpoint)
-      return promise if rate_limited_ip?(promise)
+      return promise if rate_limited_ip?(endpoint, promise)
 
       req = build_request(endpoint, data)
       return promise if missing_body?(req, promise)
@@ -53,12 +57,36 @@ module Celerbrake
       end
 
       parsed_resp = Response.parse(response)
-      handle_rate_limit(parsed_resp)
+      handle_rate_limit(parsed_resp, endpoint)
       @backlog << [data, endpoint] if add_to_backlog?(parsed_resp)
 
       return promise.reject(parsed_resp['error']) if parsed_resp.key?('error')
 
       promise.resolve(parsed_resp)
+    end
+
+    # Tells when the rate-limit suppression for +endpoint+ expires. Exposed so
+    # that an operator (or an agent asking "why did this app go quiet?") can
+    # see that reporting is currently suppressed and until when — a silently
+    # dropped notice is otherwise undetectable from inside the app.
+    #
+    # @param [URI::HTTPS, String] endpoint
+    # @return [Time, nil] when sends resume, or nil when not suppressed
+    def rate_limit_reset(endpoint = @config.error_endpoint)
+      @rate_limit.reset_at(endpoint)
+    end
+
+    # @param [URI::HTTPS, String] endpoint
+    # @return [Boolean] whether sends to +endpoint+ are currently suppressed
+    #   by a 429 backoff
+    def rate_limited?(endpoint = @config.error_endpoint)
+      @rate_limit.suppressed?(endpoint)
+    end
+
+    # @return [Integer] how many payloads this sender has dropped because the
+    #   destination was rate limiting it (since the sender was created)
+    def rate_limited_drops
+      @rate_limit.drops
     end
 
     # Closes all the resources that this sender has allocated.
@@ -108,10 +136,15 @@ module Celerbrake
       req
     end
 
-    def handle_rate_limit(parsed_resp)
+    # Records the backoff window Response computed for this endpoint. The
+    # window is already clamped to Response::MAX_RATE_LIMIT_DELAY, so a
+    # hostile or fat-fingered Retry-After cannot blind the app for a shift.
+    #
+    # @return [void]
+    def handle_rate_limit(parsed_resp, endpoint)
       return unless parsed_resp.key?('rate_limit_reset')
 
-      @rate_limit_reset = parsed_resp['rate_limit_reset']
+      @rate_limit.suppress(endpoint, parsed_resp['rate_limit_reset'])
     end
 
     def add_to_backlog?(parsed_resp)
@@ -128,10 +161,15 @@ module Celerbrake
        @config.proxy[:password]]
     end
 
-    def rate_limited_ip?(promise)
-      rate_limited = Time.now < @rate_limit_reset
-      promise.reject("#{LOG_LABEL} IP is rate limited") if rate_limited
-      rate_limited
+    def rate_limited_ip?(endpoint, promise)
+      reset = @rate_limit.reset_at(endpoint)
+      return false unless reset
+
+      promise.reject("#{LOG_LABEL} IP is rate limited")
+      # Never a silent drop: counted and (throttled) logged, so an operator or
+      # agent can see that reporting is suppressed and until when.
+      @rate_limit.note_drop(endpoint, reset)
+      true
     end
 
     def missing_body?(req, promise)
