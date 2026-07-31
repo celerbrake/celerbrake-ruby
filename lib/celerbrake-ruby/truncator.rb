@@ -29,8 +29,8 @@ module Celerbrake
     #   rather than its payload — but ONLY inside the notice subtree this gem
     #   authors itself (`Notice::IDENTITY_SUBTREE`, i.e. `errors`). Everywhere
     #   else — a user's params, session or environment — a key called `:type`
-    #   or `:file` is ordinary data and MUST keep truncating normally. See
-    #   `#truncate`'s `identity:` argument.
+    #   or `:file` is ordinary data and MUST keep truncating normally. That is
+    #   the difference between {#truncate} and {#truncate_identity_subtree}.
     #
     # `Notice#to_json` HALVES `max_size` (10000, 5000, … 39, 19, 9, 4, 2, 1)
     # until the whole notice fits `MAX_NOTICE_SIZE`, so where the notice lands
@@ -93,6 +93,54 @@ module Celerbrake
     # elements and hash entries, and both of those still follow `max_size` all
     # the way down. At budget 1 a backtrace keeps one frame and a hash one key,
     # floor or no floor.
+    #
+    # KNOWN COST, ACCEPTED AND BOUNDED — the floor makes `Notice#to_json`
+    # give up (return nil, after `Notice#truncate` logs the payload at ERROR)
+    # very slightly EARLIER than the unfloored gem does, so there is a narrow
+    # band of payload sizes that the unfloored gem delivered and this one
+    # drops. Its width is provable, not empirical.
+    #
+    # `Notice#to_json` checks the payload BEFORE each truncation pass, so the
+    # last state it ever measures is the one truncated at budget **2** (the
+    # budget-1 pass is applied and then discarded when `reduce_max_size`
+    # returns 0 and the loop breaks). At budget 2 `#truncate_array` slices
+    # `errors` to 2 entries and `#truncate_hash` keeps each entry's first 2
+    # keys — `type` and `message` out of `NestedException#as_json`. So AT MOST
+    # TWO floored strings can exist at the deciding moment, whatever the
+    # backtrace looks like: `backtrace` is the third key and is already gone.
+    #
+    #   band <= 2 x ((IDENTITY_FLOOR + TRUNCATED.length) - (2 + TRUNCATED.length))
+    #        =  2 x (IDENTITY_FLOOR - 2)  =  508 bytes
+    #
+    # Measured (Ruby 3.3.10, 7-char hostname, largest `root_directory` that
+    # still yields a non-nil `to_json`, two-deep `cause` chain, class-name
+    # length L):
+    #
+    #     L        0f8956b   this tree   band
+    #     12         63563      63565      -2   <- floor DELIVERS where unfixed drops
+    #     48         63563      63493      70   <- production max observed
+    #    100         63563      63389     174
+    #    256         63563      63077     486
+    #    267+        63563      63055     508   <- saturates, cannot grow
+    #
+    # With a single (uncaused) exception every number halves. The band is
+    # NEGATIVE for class names <= 12 chars, because the floor keeps
+    # `RuntimeError` (12) where cutting produces `R[Truncated]` (13).
+    #
+    # Reaching the band at all requires the notice to be ~99.2% content that
+    # truncation cannot touch: `Notice#context` is built once in `#initialize`
+    # and is absent from {Notice::TRUNCATABLE_KEYS}, so `rootDirectory`,
+    # `versions` and `error_message` never shrink. Saturating it additionally
+    # requires a >= 267-character exception class name, against a production
+    # maximum of 48 across 148 groups.
+    #
+    # NOT closing this band is deliberate. The only available remedy — a final
+    # unfloored pass before giving up — would, exactly in the regime where it
+    # fires, deliver a notice whose `type` is `Ex[Truncated]`: a
+    # payload-size-dependent fingerprint, i.e. a brand-new spurious error
+    # group, an `error_group.new` alert and an autonomous triage task. That is
+    # the defect this floor exists to prevent, so the remedy trades one logged
+    # drop for one fabricated error group. `truncator_spec` pins the bound.
     IDENTITY_FLOOR = 256
 
     # @param [Integer] max_size maximum size of hashes, arrays and strings
@@ -103,20 +151,35 @@ module Celerbrake
     # Performs deep truncation of arrays, hashes, sets & strings. Uses a
     # placeholder for recursive objects (`[Circular]`).
     #
+    # THE SIGNATURE IS LOAD-BEARING and must stay free of keyword parameters.
+    # A symbol-keyed Hash literal at a call site — `truncate(rows: [1])`, the
+    # shape used all over this gem's own specs and benchmarks — parses as
+    # KEYWORDS the moment the method declares any, and the call blows up with
+    # `ArgumentError: wrong number of arguments (given 0, expected 1..2)`. On
+    # the Ruby 2.5–2.7 the gemspec still supports, a symbol-keyed Hash
+    # *variable* converts too, which widens the hazard past literals. So the
+    # gem-authored scope is carried by a SECOND METHOD rather than by a
+    # keyword or a positional flag: no boolean trap at the call site, no
+    # `Set.new` for the caller to accidentally hoist out of a loop, and this
+    # method's arity stays byte-identical to every released version.
+    #
     # @param [Object] object The object to truncate
     # @param [Set] seen The cache that helps to detect recursion
-    # @param [Boolean] identity Whether +object+ is a subtree that THIS GEM
-    #   authored, so that {IDENTITY_KEYS} found inside it are the error's
-    #   identity and get {IDENTITY_FLOOR}. Defaults to +false+, which is the
-    #   only correct answer for anything a host application supplied.
     # @return [Object] truncated object
-    def truncate(object, seen = Set.new, identity: false)
-      if seen.include?(object.object_id)
-        return CIRCULAR if CIRCULAR_TYPES.any? { |t| object.is_a?(t) }
+    def truncate(object, seen = Set.new)
+      truncate_scoped(object, seen, false)
+    end
 
-        return object
-      end
-      truncate_object(object, seen << object.object_id, identity)
+    # Same as {#truncate}, but declares that +object+ is a subtree THIS GEM
+    # authored, so {IDENTITY_KEYS} found inside it are the error's identity
+    # and get {IDENTITY_FLOOR}. Only {Notice::IDENTITY_SUBTREE} qualifies;
+    # anything a host application supplied must go through {#truncate}.
+    #
+    # @param [Object] object The object to truncate
+    # @param [Set] seen The cache that helps to detect recursion
+    # @return [Object] truncated object
+    def truncate_identity_subtree(object, seen = Set.new)
+      truncate_scoped(object, seen, true)
     end
 
     # Reduces maximum allowed size of hashes, arrays, sets & strings by half.
@@ -126,6 +189,15 @@ module Celerbrake
     end
 
     private
+
+    def truncate_scoped(object, seen, identity)
+      if seen.include?(object.object_id)
+        return CIRCULAR if CIRCULAR_TYPES.any? { |t| object.is_a?(t) }
+
+        return object
+      end
+      truncate_object(object, seen << object.object_id, identity)
+    end
 
     def truncate_object(object, seen, identity)
       case object
@@ -160,7 +232,7 @@ module Celerbrake
         truncated_hash[key] = if identity && identity_key?(key) && val.is_a?(String)
                                 truncate_identity_string(val)
                               else
-                                truncate(val, seen, identity: identity)
+                                truncate_scoped(val, seen, identity)
                               end
       end
 
@@ -176,10 +248,11 @@ module Celerbrake
     # a user's params inflated the notice enough to converge one rung LOWER on
     # the halving ladder and drop the very in-app frame the fingerprint needs.
     #
-    # The Symbol check survives only as a cheap second narrowing: inside
-    # `errors` every key is a Symbol (`NestedException#as_json`,
-    # `Backtrace.parse`), so a String key there could only have been injected by
-    # someone reaching past `Notice#[]=` — treat it as data.
+    # The Symbol check survives only as a cheap second narrowing: everything
+    # THIS GEM puts under `errors` is symbol-keyed (`NestedException#as_json`,
+    # `Backtrace.parse`), so a String key there was put there by host code
+    # mutating `notice[:errors]` inside a `notify` block — supported, but not
+    # this gem's identity, so treat it as data.
     #
     # No rescue is needed: `Array#include?` on a frozen Symbol array cannot
     # raise for any key type, which matters because this runs while the host
@@ -199,7 +272,7 @@ module Celerbrake
     def truncate_array(array, seen, identity)
       array
         .slice(0, @max_size)
-        .map! { |elem| truncate(elem, seen, identity: identity) }
+        .map! { |elem| truncate_scoped(elem, seen, identity) }
         .freeze
     end
 
@@ -207,7 +280,7 @@ module Celerbrake
       truncated_set = Set.new
 
       set.each do |elem|
-        truncated_set << truncate(elem, seen, identity: identity)
+        truncated_set << truncate_scoped(elem, seen, identity)
         break if truncated_set.size >= @max_size
       end
 

@@ -188,6 +188,42 @@ RSpec.describe Celerbrake::Notice do
           expect(value).to include(Celerbrake::Truncator::TRUNCATED)
           expect(value.length).to be < Celerbrake::Truncator::IDENTITY_FLOOR
         end
+
+        # IDENTITY_SUBTREE is a CONVENTION, not an enforced boundary, and the
+        # code must not be documented as if it were one. `errors` is missing
+        # from WRITABLE_KEYS, but only `#[]=` consults that list — `#[]` hands
+        # back the live object, and mutating it inside a `notify` block is the
+        # documented public way to adjust a notice. The sibling `celerbrake`
+        # gem's Logger integration relies on precisely this to drop internal
+        # Logger frames:
+        #
+        #   notice[:errors].first[:backtrace] =
+        #     backtrace.drop_while { |frame| frame[:file] =~ %r{/logger.rb\z} }
+        #
+        # These two examples pin both halves of that reality, so neither the
+        # comment nor the sibling gem can silently go stale.
+        context "when host code reaches into the identity subtree" do
+          it "is not prevented from doing so, which the sibling gem depends on" do
+            notice = described_class.new(exception_with_app_frame)
+
+            expect { notice[:errors].first[:backtrace] = [] }.not_to raise_error
+            expect(notice[:errors].first[:backtrace]).to eq([])
+          end
+
+          it "inherits the identity floor for whatever it leaves behind" do
+            # Params fat enough to drive the ladder to the bottom, so the
+            # host-written frame is actually put through the truncator.
+            notice = described_class.new(exception_with_app_frame, deeply_nested_params)
+            notice[:errors].first[:backtrace] =
+              [{ file: 'H' * 400, line: 1, function: 'x' }]
+
+            frame = JSON.parse(notice.to_json)['errors'][0]['backtrace'][0]
+
+            expect(frame['file'].length)
+              .to eq(Celerbrake::Truncator::IDENTITY_FLOOR +
+                     Celerbrake::Truncator::TRUNCATED.length)
+          end
+        end
       end
 
       context "when truncation failed" do

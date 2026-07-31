@@ -285,7 +285,7 @@ RSpec.describe Celerbrake::Truncator do
       end
 
       def truncate_identity(obj)
-        described_class.new(max_size).truncate(obj, identity: true)
+        described_class.new(max_size).truncate_identity_subtree(obj)
       end
 
       def truncate_payload(obj)
@@ -348,11 +348,136 @@ RSpec.describe Celerbrake::Truncator do
           expect(out[:file].length).to eq(out[:other].length)
         end
 
-        it "is what `identity: false` means all the way down a nested payload" do
+        it "is what the unmarked call means all the way down a nested payload" do
           out = truncate_payload(rows: [{ type: 'T' * 400 }])
 
           expect(out[:rows][0][:type]).to eq("#{'T' * max_size}#{cut_mark}")
         end
+      end
+
+      # THE SIGNATURE REGRESSION. The scope was first carried by a keyword
+      # (`truncate(object, seen = Set.new, identity: false)`), which silently
+      # broke every caller that passes a bare symbol-keyed Hash: Ruby parses
+      # the literal as KEYWORDS the moment the method declares any, so
+      # `truncate(rows: [1])` raised `ArgumentError: wrong number of arguments
+      # (given 0, expected 1..2)`. That shape is used throughout this file and
+      # in the repro recorded in the branch's own commit messages; on the Ruby
+      # 2.5-2.7 the gemspec still supports, a symbol-keyed Hash VARIABLE
+      # converts too. The scope now travels as a second method name, so
+      # `#truncate`'s arity is byte-identical to every released version.
+      context "when a caller passes a bare symbol-keyed hash" do
+        it "treats it as the object to truncate, not as keyword arguments" do
+          expect(described_class.new(39).truncate(rows: [1])).to eq(rows: [1])
+        end
+
+        it "treats it as the object on the identity-scoped entry point too" do
+          expect(described_class.new(39).truncate_identity_subtree(rows: [1]))
+            .to eq(rows: [1])
+        end
+
+        it "accepts a symbol-keyed hash held in a variable" do
+          payload = { type: 'T' * 400, other: 'O' * 400 }
+
+          out = described_class.new(39).truncate(payload)
+
+          expect(out[:type]).to eq("#{'T' * 39}#{cut_mark}")
+          expect(out[:other]).to eq("#{'O' * 39}#{cut_mark}")
+        end
+      end
+    end
+
+    # The identity floor buys fingerprint stability with delivery headroom:
+    # `Notice#context` is built once in `#initialize` and is absent from
+    # TRUNCATABLE_KEYS, so a notice made almost entirely of `rootDirectory` /
+    # `versions` / `error_message` can exhaust the ladder and be dropped. The
+    # floor makes that happen marginally earlier than the unfloored gem.
+    #
+    # That band is ACCEPTED, not closed — the only remedy (a final unfloored
+    # pass before giving up) would ship a `Ex[Truncated]` fingerprint, i.e.
+    # fabricate the very error group the floor exists to prevent. But it must
+    # stay BOUNDED, so this pins the bound.
+    #
+    # The instrument needs no second checkout: stubbing IDENTITY_FLOOR to 0
+    # makes `#truncate_identity_string` compute `[@max_size, 0].max`, which is
+    # `#truncate_string` exactly — the unfloored gem, in process.
+    describe "the delivery headroom the identity floor costs" do
+      # `Notice#to_json` measures the payload BEFORE each pass, so the last
+      # state it ever sees is the one cut at budget 2: `errors` sliced to 2
+      # entries, each keeping its first 2 keys (`type`, `message`). At most
+      # TWO floored strings can therefore exist at the deciding moment.
+      #
+      # Captured eagerly, because the examples below stub IDENTITY_FLOOR to 0
+      # and a lazy `let` would read the stub instead of the real ceiling.
+      let!(:max_band) { 2 * (Celerbrake::Truncator::IDENTITY_FLOOR - 2) }
+
+      # A fresh Config logs to File::NULL, which matters: every probe that
+      # lands past the cliff makes `Notice#truncate` log the whole payload.
+      around do |example|
+        previous = Celerbrake::Config.instance
+        Celerbrake::Config.instance = Celerbrake::Config.new
+        example.run
+      ensure
+        Celerbrake::Config.instance = previous
+      end
+
+      # Two nested exceptions whose class names sit past the floor: the worst
+      # case the bound has to cover, since `errors` keeps two entries.
+      def caused_exception(class_name_length)
+        named = lambda do |i|
+          name = "E#{i}#{'x' * (class_name_length - 2)}"
+          Class.new(RuntimeError) { define_singleton_method(:name) { name } }
+        end
+
+        begin
+          begin
+            raise named[0], 'inner'
+          rescue StandardError
+            raise named[1], 'outer'
+          end
+        rescue StandardError => e
+          e
+        end
+      end
+
+      def largest_root_that_delivers(class_name_length)
+        delivers = lambda do |len|
+          Celerbrake::Config.instance.root_directory = 'r' * len
+          !Celerbrake::Notice.new(caused_exception(class_name_length)).to_json.nil?
+        end
+
+        lo = 0
+        hi = Celerbrake::Notice::MAX_NOTICE_SIZE
+        raise 'instrument broken: an empty root must deliver' unless delivers[lo]
+        raise 'instrument broken: a full-size root must drop' if delivers[hi]
+
+        while hi - lo > 1
+          mid = (lo + hi) / 2
+          delivers[mid] ? lo = mid : hi = mid
+        end
+        lo
+      end
+
+      def unfloored_largest_root_that_delivers(class_name_length)
+        stub_const('Celerbrake::Truncator::IDENTITY_FLOOR', 0)
+        largest_root_that_delivers(class_name_length)
+      end
+
+      it "is bounded by two floored identity strings, whatever the class name" do
+        floored = largest_root_that_delivers(400)
+        band = unfloored_largest_root_that_delivers(400) - floored
+
+        expect(band).to be_positive    # the cost is real, not hypothetical
+        expect(band).to be <= max_band # ...and 508 bytes is the ceiling
+      end
+
+      it "is negligible at the exception class lengths production actually has" do
+        # Longest exception class observed across 148 production error groups
+        # was 48 characters — far under the floor, so the floor never cuts and
+        # the band is a rounding error on a 64 KB notice.
+        floored = largest_root_that_delivers(48)
+        band = unfloored_largest_root_that_delivers(48) - floored
+
+        expect(band).to be < max_band / 4
       end
     end
   end

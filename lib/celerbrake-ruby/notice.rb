@@ -37,15 +37,38 @@ module Celerbrake
     TRUNCATABLE_KEYS = %i[errors environment session params].freeze
 
     # @return [Symbol] the ONE truncatable part of the payload that this gem
-    #   authors itself — `NestedException#as_json` + `Backtrace.parse`. It is
-    #   also the only one absent from {WRITABLE_KEYS}, so a host application
-    #   cannot reach into it.
+    #   authors itself — `NestedException#as_json` + `Backtrace.parse`.
     #
     #   Everything else in {TRUNCATABLE_KEYS} is the host application's data,
     #   where a key named `type`/`file`/`function` means whatever the
     #   application meant by it. Only this subtree gets
     #   {Celerbrake::Truncator::IDENTITY_FLOOR}; widening it past `errors`
     #   re-introduces the defect that scoping exists to prevent.
+    #
+    #   THIS IS A CONVENTION, NOT AN ENFORCED BOUNDARY. `errors` is absent
+    #   from {WRITABLE_KEYS}, but only {#[]=} consults that list; {#[]} hands
+    #   back the LIVE payload object, and mutating it inside a
+    #   `notify { |notice| … }` block is the documented public way to adjust a
+    #   notice. The sibling `celerbrake` gem does exactly that — its
+    #   `Celerbrake::Logger` rewrites `notice[:errors].first[:backtrace]` to
+    #   drop internal Logger frames. So host code CAN reach into this subtree,
+    #   and whatever it leaves behind under a `:type`/`:file`/`:function` key
+    #   inherits {Celerbrake::Truncator::IDENTITY_FLOOR}.
+    #
+    #   That is acceptable, for three reasons. Reaching into `errors` is a
+    #   deliberate act on the error's identity — the exact thing the floor
+    #   protects — not the accidental collision that scoping exists to stop
+    #   (a host symbol-keying its own `:type`/`:file` in `params`, which no
+    #   longer reaches the floor at all). The floor is a floor and not an
+    #   exemption, so the worst case is bounded: {IDENTITY_FLOOR} characters,
+    #   up to ~1 KB of 4-byte UTF-8, per identity-named string. And the
+    #   consequence of abusing it is the branch's already-documented failure
+    #   mode — an inflated `errors` subtree converges one rung lower on the
+    #   halving ladder — not a new one.
+    #
+    #   The line NOT to cross is doing this to a host-supplied subtree.
+    #   {Celerbrake::Truncator#truncate_identity_subtree} must be called with
+    #   this key and no other.
     IDENTITY_SUBTREE = :errors
 
     # @return [String] the name of the host machine
@@ -153,9 +176,13 @@ module Celerbrake
       TRUNCATABLE_KEYS.each do |key|
         # ONE truncator, so the identity-aware pass and the ordinary pass can
         # never drift onto different rungs of the halving ladder; the scope is
-        # carried by the argument instead of by a second instance.
+        # carried by the method name instead of by a second instance.
         @payload[key] =
-          @truncator.truncate(@payload[key], identity: key == IDENTITY_SUBTREE)
+          if key == IDENTITY_SUBTREE
+            @truncator.truncate_identity_subtree(@payload[key])
+          else
+            @truncator.truncate(@payload[key])
+          end
       end
 
       new_max_size = @truncator.reduce_max_size
