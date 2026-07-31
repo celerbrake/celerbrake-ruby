@@ -25,24 +25,53 @@ module Celerbrake
     # @return [Array<Class>] The types that can contain references to itself
     CIRCULAR_TYPES = [Array, Hash, Set].freeze
 
-    # @return [Array<Symbol,String>] hash keys that carry the IDENTITY of an
-    #   error rather than its payload. Cutting these does not lose detail — it
-    #   changes which bug the server thinks it is looking at.
+    # @return [Array<Symbol>] hash keys that carry the IDENTITY of an error
+    #   rather than its payload — but ONLY inside the notice subtree this gem
+    #   authors itself (`Notice::IDENTITY_SUBTREE`, i.e. `errors`). Everywhere
+    #   else — a user's params, session or environment — a key called `:type`
+    #   or `:file` is ordinary data and MUST keep truncating normally. See
+    #   `#truncate`'s `identity:` argument.
     #
     # `Notice#to_json` HALVES `max_size` (10000, 5000, … 39, 19, 9, 4, 2, 1)
-    # until the whole notice fits `MAX_NOTICE_SIZE`, so the cut point measures
-    # how big the payload happened to be, not anything about the error. The
-    # server fingerprints on exception class + top app frame's file + function,
-    # so a payload-driven cut silently mints a NEW error group — and each new
-    # group fires `error_group.new` and opens an autonomous triage task.
+    # until the whole notice fits `MAX_NOTICE_SIZE`, so where the notice lands
+    # on that ladder measures how big the payload happened to be, not anything
+    # about the error. The server fingerprints on exception class + the top
+    # IN-APP frame's file + function, so a payload-driven cut silently mints a
+    # NEW error group — and each new group fires `error_group.new` and opens an
+    # autonomous triage task.
     #
-    # Measured on a real Celerbrake install (2026-07-31): ONE
-    # `ActiveRecord::DatabaseConnectionError` existed as FOUR groups —
-    # `ActiveRecord::Datab[Truncated]` (10,157 occurrences),
-    # `ActiveRec[Truncated]` (2,438), `Acti[Truncated]` (1,155), and one whose
-    # class was intact but whose FILE was cut one character early
-    # (16,011) — that last being larger than the other three combined.
-    # `function` is included on the same reasoning; it is a fingerprint input too.
+    # There are TWO mechanisms, and `type` and `file`/`function` are hit by
+    # different ones:
+    #
+    #   * STRING CUTTING shortens the exception class: at budget 19 a real
+    #     production group carries `ActiveRecord::Datab[Truncated]`, at 9
+    #     `ActiveRec[Truncated]`, at 4 `Acti[Truncated]`.
+    #   * FRAME DROPPING is what moves the frame: `#truncate_array` slices the
+    #     backtrace to `max_size` frames, so a low rung DELETES the in-app frame
+    #     and the server falls back to the first gem frame. Flooring the strings
+    #     does not put the frame back — it only stops the surviving frame's path
+    #     from being cut at a payload-dependent point.
+    #
+    # Measured against the server's real `Fingerprint.for` over production
+    # occurrence 109773 (group 69, 122 frames, in-app frame at ordinal 53),
+    # replaying budgets 122/78/39/19/9/4 (2026-07-31):
+    #
+    #   flooring nothing         -> 5 distinct fingerprints from 6 budgets
+    #   flooring `type` alone    -> 5 distinct fingerprints  (no improvement)
+    #   flooring type+file+func  -> 2 distinct fingerprints
+    #
+    # That counterfactual — not any claim that two production groups carry the
+    # same frame — is why `file` and `function` are in this list. They do NOT
+    # carry the same frame. Sampling the 2,000 most recent occurrences of the
+    # five groups this one bug produced shows frame counts that ARE the ladder's
+    # rungs, and only the uncut group keeping an in-app frame at all:
+    #
+    #   group  sampled  with an in-app frame  frames
+    #     67        58                     0       9
+    #     68       184                     0      19
+    #     69      1377                  1377  78-123
+    #     70       351                     0      39
+    #     71        30                     0       4
     IDENTITY_KEYS = %i[type file function].freeze
 
     # @return [Integer] the smallest `max_size` ever applied to an IDENTITY_KEY.
@@ -55,10 +84,15 @@ module Celerbrake
     # 256 is ~2.3x the longest real value observed across 148 production error
     # groups (exception class max 48 / avg 23; top frame file max 113 / avg 40).
     #
-    # This CANNOT stop `Notice#to_json` converging: the notice shrinks by
-    # dropping array elements and hash entries as well as by cutting strings, and
-    # both of those still follow `max_size` all the way down. At budget 1 a
-    # backtrace keeps one frame and a hash one key, floor or no floor.
+    # It is a CHARACTER floor, like every other length in this class, so the
+    # BYTE cost is up to 4x it — ~1 KB for an identity value made entirely of
+    # 4-byte UTF-8. At budget `b` the errors subtree retains at most `b` errors
+    # x (1 class + `b` frames x 2 fields) floored strings, i.e. O(b^2), so the
+    # worst case shrinks fast as the ladder descends and the floor CANNOT stop
+    # `Notice#to_json` converging: the notice also shrinks by dropping array
+    # elements and hash entries, and both of those still follow `max_size` all
+    # the way down. At budget 1 a backtrace keeps one frame and a hash one key,
+    # floor or no floor.
     IDENTITY_FLOOR = 256
 
     # @param [Integer] max_size maximum size of hashes, arrays and strings
@@ -71,14 +105,18 @@ module Celerbrake
     #
     # @param [Object] object The object to truncate
     # @param [Set] seen The cache that helps to detect recursion
+    # @param [Boolean] identity Whether +object+ is a subtree that THIS GEM
+    #   authored, so that {IDENTITY_KEYS} found inside it are the error's
+    #   identity and get {IDENTITY_FLOOR}. Defaults to +false+, which is the
+    #   only correct answer for anything a host application supplied.
     # @return [Object] truncated object
-    def truncate(object, seen = Set.new)
+    def truncate(object, seen = Set.new, identity: false)
       if seen.include?(object.object_id)
         return CIRCULAR if CIRCULAR_TYPES.any? { |t| object.is_a?(t) }
 
         return object
       end
-      truncate_object(object, seen << object.object_id)
+      truncate_object(object, seen << object.object_id, identity)
     end
 
     # Reduces maximum allowed size of hashes, arrays, sets & strings by half.
@@ -89,11 +127,11 @@ module Celerbrake
 
     private
 
-    def truncate_object(object, seen)
+    def truncate_object(object, seen, identity)
       case object
-      when Hash then truncate_hash(object, seen)
-      when Array then truncate_array(object, seen)
-      when Set then truncate_set(object, seen)
+      when Hash then truncate_hash(object, seen, identity)
+      when Array then truncate_array(object, seen, identity)
+      when Set then truncate_set(object, seen, identity)
       when String then truncate_string(object)
       when Numeric, TrueClass, FalseClass, Symbol, NilClass then object
       else
@@ -114,26 +152,34 @@ module Celerbrake
       object.to_s
     end
 
-    def truncate_hash(hash, seen)
+    def truncate_hash(hash, seen, identity)
       truncated_hash = {}
       hash.each_with_index do |(key, val), idx|
         break if idx + 1 > @max_size
 
-        truncated_hash[key] = if identity_key?(key) && val.is_a?(String)
+        truncated_hash[key] = if identity && identity_key?(key) && val.is_a?(String)
                                 truncate_identity_string(val)
                               else
-                                truncate(val, seen)
+                                truncate(val, seen, identity: identity)
                               end
       end
 
       truncated_hash.freeze
     end
 
-    # SYMBOL keys only, deliberately. `NestedException#as_json` and
-    # `Backtrace.parse` always emit these as Symbols, so a Symbol match hits
-    # exactly the gem's own identity fields. Coercing (`key.to_s.to_sym`) would
-    # also match a user's params containing a STRING key `"file"` — that is
-    # their payload, not our identity, and it should keep truncating normally.
+    # Only reached when `identity` is true, i.e. under the gem-authored subtree.
+    # THAT is what makes these keys identity rather than data — not the fact
+    # that they are Symbols. An earlier revision floored any Symbol key called
+    # `:type`/`:file`/`:function` anywhere in the notice on the theory that
+    # Symbol implied gem-authored; it does not (STI `:type`, upload `:file` and
+    # Sidekiq args are routinely symbol-keyed), and the measured result was that
+    # a user's params inflated the notice enough to converge one rung LOWER on
+    # the halving ladder and drop the very in-app frame the fingerprint needs.
+    #
+    # The Symbol check survives only as a cheap second narrowing: inside
+    # `errors` every key is a Symbol (`NestedException#as_json`,
+    # `Backtrace.parse`), so a String key there could only have been injected by
+    # someone reaching past `Notice#[]=` — treat it as data.
     #
     # No rescue is needed: `Array#include?` on a frozen Symbol array cannot
     # raise for any key type, which matters because this runs while the host
@@ -144,21 +190,24 @@ module Celerbrake
 
     def truncate_identity_string(str)
       fixed_str = replace_invalid_characters(str)
-      floor = @max_size > IDENTITY_FLOOR ? @max_size : IDENTITY_FLOOR
+      floor = [@max_size, IDENTITY_FLOOR].max
       return fixed_str if fixed_str.length <= floor
 
       (fixed_str.slice(0, floor) + TRUNCATED).freeze
     end
 
-    def truncate_array(array, seen)
-      array.slice(0, @max_size).map! { |elem| truncate(elem, seen) }.freeze
+    def truncate_array(array, seen, identity)
+      array
+        .slice(0, @max_size)
+        .map! { |elem| truncate(elem, seen, identity: identity) }
+        .freeze
     end
 
-    def truncate_set(set, seen)
+    def truncate_set(set, seen, identity)
       truncated_set = Set.new
 
       set.each do |elem|
-        truncated_set << truncate(elem, seen)
+        truncated_set << truncate(elem, seen, identity: identity)
         break if truncated_set.size >= @max_size
       end
 

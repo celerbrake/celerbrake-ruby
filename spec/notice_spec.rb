@@ -90,6 +90,106 @@ RSpec.describe Celerbrake::Notice do
         include_examples 'payloads', 300, small_msg
       end
 
+      # The identity floor and its scope. `Notice#truncate` walks
+      # TRUNCATABLE_KEYS and marks exactly ONE of them — IDENTITY_SUBTREE
+      # (`errors`) — as gem-authored, so `type`/`file`/`function` are floored
+      # there and NOWHERE else. Both halves are load-bearing:
+      #
+      #   * without the floor, the halving ladder cuts the exception class and
+      #     the surviving frame's path at a point that depends on how big the
+      #     payload happened to be, and the server keys a brand-new error group
+      #     off that cut — one `error_group.new` alert and one autonomous triage
+      #     task per size band;
+      #   * without the SCOPE, an application's own symbol-keyed `:type`/`:file`
+      #     params get floored too, inflating the notice, converging one rung
+      #     lower and dropping MORE backtrace frames than the unfixed gem —
+      #     including the in-app frame the fingerprint reads.
+      context "identity" do
+        # 100 gem frames with ONE app frame at index 50: retained at the ladder's
+        # 78-frame rung, deleted at the 39-frame rung below it. That is the
+        # difference this spec is built to detect.
+        def exception_with_app_frame
+          gem_frame = lambda { |i|
+            "/GEM_ROOT/gems/activerecord-8.1.3/lib/active_record/" \
+              "connection_adapters/abstract/connection_pool.rb:#{100 + i}:in `checkout'"
+          }
+          frames = Array.new(100) { |i| gem_frame.call(i) }
+          frames[50] = "/PROJECT_ROOT/app/lib/services/billing/renewal.rb:88:in `charge!'"
+
+          ex = CelerbrakeTestError.new
+          ex.set_backtrace(frames)
+          ex
+        end
+
+        def delivered(params)
+          json = described_class.new(exception_with_app_frame, params).to_json
+          expect(json).not_to be_nil
+          JSON.parse(json)
+        end
+
+        # n rows fat enough to force the notice several rungs down the ladder.
+        def rows(n, key_a, key_b, key_c)
+          Array.new(n) do |i|
+            { key_a => "data:application/pdf;base64,#{'A' * 380}#{i}",
+              key_b => "Billing::Import::Row::#{'V' * 380}#{i}",
+              key_c => "handler_#{'h' * 380}#{i}" }
+          end
+        end
+
+        def app_frame(payload)
+          payload['errors'][0]['backtrace']
+            .find { |f| f['file'].to_s.start_with?('/PROJECT_ROOT') }
+        end
+
+        # NESTED params, because nesting is what actually drives a notice to the
+        # bottom of the ladder: at budget b a depth-4 hash costs ~b**4, so this
+        # one is still ~400 KB at b=10 and only fits at b=4 — the same rung
+        # production groups 67/68/71 were cut at. A single flat 200 KB string
+        # would settle around b=2500 and prove nothing.
+        def deeply_nested_params(depth = 4, breadth = 10)
+          return 'v' * 20 if depth.zero?
+
+          (0...breadth).each_with_object({}) do |i, h|
+            h[:"k#{i}"] = deeply_nested_params(depth - 1, breadth)
+          end
+        end
+
+        it "keeps the exception class whole however far the ladder descends" do
+          payload = delivered(deeply_nested_params)
+
+          # Guard the instrument: this payload must actually reach the bottom.
+          expect(payload['errors'][0]['backtrace'].size).to be <= 4
+          expect(payload['errors'][0]['type']).to eq('CelerbrakeTestError')
+        end
+
+        it "keeps the surviving frame's file and function whole" do
+          frame = delivered(deeply_nested_params)['errors'][0]['backtrace'][0]
+
+          expect(frame['file']).not_to include(Celerbrake::Truncator::TRUNCATED)
+          expect(frame['function']).to eq('checkout')
+        end
+
+        # THE REGRESSION SPEC. Same payload twice; only the params' KEY NAMES
+        # differ. If the floor escapes `errors`, the left-hand run inflates and
+        # loses frames the right-hand run keeps.
+        it "does not let identity-named user params cost backtrace frames" do
+          colliding = delivered(rows: rows(90, :file, :type, :function))
+          control   = delivered(rows: rows(90, :filex, :typex, :functionx))
+
+          expect(colliding['errors'][0]['backtrace'].size)
+            .to eq(control['errors'][0]['backtrace'].size)
+          expect(app_frame(colliding)).not_to be_nil
+        end
+
+        it "truncates a symbol-keyed params[:file] at the notice's budget" do
+          payload = delivered(rows: rows(90, :file, :type, :function))
+          value = payload['params']['rows'][0]['file']
+
+          expect(value).to include(Celerbrake::Truncator::TRUNCATED)
+          expect(value.length).to be < Celerbrake::Truncator::IDENTITY_FLOOR
+        end
+      end
+
       context "when truncation failed" do
         it "returns nil" do
           allow_any_instance_of(Celerbrake::Truncator)

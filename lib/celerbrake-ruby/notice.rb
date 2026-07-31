@@ -36,6 +36,18 @@ module Celerbrake
     #   by the truncator
     TRUNCATABLE_KEYS = %i[errors environment session params].freeze
 
+    # @return [Symbol] the ONE truncatable part of the payload that this gem
+    #   authors itself — `NestedException#as_json` + `Backtrace.parse`. It is
+    #   also the only one absent from {WRITABLE_KEYS}, so a host application
+    #   cannot reach into it.
+    #
+    #   Everything else in {TRUNCATABLE_KEYS} is the host application's data,
+    #   where a key named `type`/`file`/`function` means whatever the
+    #   application meant by it. Only this subtree gets
+    #   {Celerbrake::Truncator::IDENTITY_FLOOR}; widening it past `errors`
+    #   re-introduces the defect that scoping exists to prevent.
+    IDENTITY_SUBTREE = :errors
+
     # @return [String] the name of the host machine
     HOSTNAME = Socket.gethostname.freeze
 
@@ -139,7 +151,11 @@ module Celerbrake
 
     def truncate
       TRUNCATABLE_KEYS.each do |key|
-        @payload[key] = @truncator.truncate(@payload[key])
+        # ONE truncator, so the identity-aware pass and the ordinary pass can
+        # never drift onto different rungs of the halving ladder; the scope is
+        # carried by the argument instead of by a second instance.
+        @payload[key] =
+          @truncator.truncate(@payload[key], identity: key == IDENTITY_SUBTREE)
       end
 
       new_max_size = @truncator.reduce_max_size

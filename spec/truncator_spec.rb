@@ -242,18 +242,12 @@ RSpec.describe Celerbrake::Truncator do
     context "given an array with hashes and hash-like objects with identical keys" do
       let(:hashie) { Class.new(Hash) }
 
-      # `data` is deliberately NOT one of Truncator::IDENTITY_KEYS. This example
-      # is about hash-like objects with identical keys, not about truncation
-      # policy. It previously used `file`, which is now floored at
-      # IDENTITY_FLOOR and would no longer truncate at max_size 3 — an
-      # incidental collision that would have left the example silently not
-      # testing the thing it is named for.
       let(:object) do
         {
           errors: [
-            { data: 'a' },
-            { data: 'a' },
-            hashie.new.merge(data: 'bcde'),
+            { file: 'a' },
+            { file: 'a' },
+            hashie.new.merge(file: 'bcde'),
           ],
         }
       end
@@ -261,9 +255,9 @@ RSpec.describe Celerbrake::Truncator do
       it "truncates values" do
         expect(truncator).to eq(
           errors: [
-            { data: 'a' },
-            { data: 'a' },
-            hashie.new.merge(data: 'bcd[Truncated]'),
+            { file: 'a' },
+            { file: 'a' },
+            hashie.new.merge(file: 'bcd[Truncated]'),
           ],
         )
         expect(truncator).to be_frozen
@@ -273,53 +267,92 @@ RSpec.describe Celerbrake::Truncator do
     # Identity keys carry WHICH BUG this is, not how much detail we kept.
     # Cutting them makes the server fingerprint a payload-size artifact as a
     # brand-new error group, which fires an alert and opens a triage task.
+    #
+    # The floor applies ONLY where the caller says the subtree is gem-authored.
+    # `Notice#truncate` says so for `:errors` and for nothing else.
     context "given the identity keys of an error" do
       let(:max_size) { 4 }
+      let(:floored)  { Celerbrake::Truncator::IDENTITY_FLOOR }
+      let(:cut_mark) { Celerbrake::Truncator::TRUNCATED }
 
       let(:klass) { 'ActiveRecord::DatabaseConnectionError' }
       let(:path)  { '/GEM_ROOT/gems/activerecord-8.1.3/lib/active_record/x.rb' }
 
-      let(:object) do
-        [{ type: klass, message: 'm' * 50, backtrace: [{ file: path, line: 42, function: 'connect' }] }]
+      let(:errors) do
+        [{ type: klass,
+           message: 'm' * 50,
+           backtrace: [{ file: path, line: 42, function: 'connect' }] }]
       end
 
-      it "keeps type, file and function whole at a budget that would shred them" do
-        error = truncator[0]
-
-        expect(error[:type]).to eq(klass)
-        expect(error[:backtrace][0][:file]).to eq(path)
-        expect(error[:backtrace][0][:function]).to eq('connect')
+      def truncate_identity(obj)
+        described_class.new(max_size).truncate(obj, identity: true)
       end
 
-      it "still truncates everything that is not an identity key" do
-        expect(truncator[0][:message]).to eq("#{'m' * 4}[Truncated]")
+      def truncate_payload(obj)
+        described_class.new(max_size).truncate(obj)
       end
 
-      it "floors identity keys rather than exempting them, so they stay bounded" do
-        huge = truncator_for([{ type: 'Z' * 100_000 }])[0][:type]
+      context "when the caller marks the subtree as gem-authored" do
+        it "keeps type, file and function whole at a budget that would shred them" do
+          error = truncate_identity(errors)[0]
 
-        expect(huge.length).to eq(Celerbrake::Truncator::IDENTITY_FLOOR + Celerbrake::Truncator::TRUNCATED.length)
-      end
+          expect(error[:type]).to eq(klass)
+          expect(error[:backtrace][0][:file]).to eq(path)
+          expect(error[:backtrace][0][:function]).to eq('connect')
+        end
 
-      it "does not raise on identity values that are not strings" do
-        [nil, 42, :sym, [1, 2], { a: 1 }, Object.new].each do |value|
-          expect { truncator_for([{ type: value, file: value, function: value }]) }.not_to raise_error
+        it "still truncates everything that is not an identity key" do
+          expect(truncate_identity(errors)[0][:message]).to eq("#{'m' * 4}#{cut_mark}")
+        end
+
+        it "floors identity keys rather than exempting them, so they stay bounded" do
+          huge = truncate_identity([{ type: 'Z' * 100_000 }])[0][:type]
+
+          expect(huge.length).to eq(floored + cut_mark.length)
+        end
+
+        it "does not raise on identity values that are not strings" do
+          [nil, 42, :sym, [1, 2], { a: 1 }, Object.new].each do |value|
+            expect { truncate_identity([{ type: value, file: value, function: value }]) }
+              .not_to raise_error
+          end
+        end
+
+        it "treats a String key inside the subtree as data, not identity" do
+          out = truncate_identity([{ 'file' => 'bcdefgh', 'type' => 'wxyzabc' }])[0]
+
+          expect(out['file']).to eq("bcde#{cut_mark}")
+          expect(out['type']).to eq("wxyz#{cut_mark}")
         end
       end
 
-      # The floor is for the gem's OWN identity fields, which are always
-      # Symbols. A user whose params happen to contain a string key "file" is
-      # sending payload, and payload keeps truncating normally.
-      it "does not floor a user's string-keyed params that collide by name" do
-        # Longer than max_size (4), so an untouched value MUST come back cut.
-        out = truncator_for([{ 'file' => 'bcdefgh', 'type' => 'wxyzabc' }])[0]
+      # THE REGRESSION. A first cut of this change matched IDENTITY_KEYS by name
+      # anywhere in the notice, on the theory that a Symbol key implied the gem
+      # had written it. Applications symbol-key their own params all the time
+      # (STI `:type`, uploads `:file`, Sidekiq args), so the floor inflated user
+      # data 5x, which pushed the notice a rung lower on the halving ladder,
+      # which dropped MORE backtrace frames — losing the in-app frame the server
+      # fingerprints on. The floor caused the defect it exists to prevent.
+      context "when the caller does not mark the subtree" do
+        it "truncates a symbol-keyed params[:file] at max_size, not at the floor" do
+          out = truncate_payload(file: 'F' * 400, type: 'T' * 400, function: 'U' * 400)
 
-        expect(out['file']).to eq("bcde#{Celerbrake::Truncator::TRUNCATED}")
-        expect(out['type']).to eq("wxyz#{Celerbrake::Truncator::TRUNCATED}")
-      end
+          expect(out[:file]).to eq("#{'F' * max_size}#{cut_mark}")
+          expect(out[:type]).to eq("#{'T' * max_size}#{cut_mark}")
+          expect(out[:function]).to eq("#{'U' * max_size}#{cut_mark}")
+        end
 
-      def truncator_for(obj)
-        described_class.new(max_size).truncate(obj)
+        it "truncates identity-named keys exactly like any other key" do
+          out = truncate_payload(file: 'F' * 400, other: 'O' * 400)
+
+          expect(out[:file].length).to eq(out[:other].length)
+        end
+
+        it "is what `identity: false` means all the way down a nested payload" do
+          out = truncate_payload(rows: [{ type: 'T' * 400 }])
+
+          expect(out[:rows][0][:type]).to eq("#{'T' * max_size}#{cut_mark}")
+        end
       end
     end
   end
