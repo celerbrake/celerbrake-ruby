@@ -307,6 +307,17 @@ RSpec.describe Celerbrake::Truncator do
         end
       end
 
+      # The floor is for the gem's OWN identity fields, which are always
+      # Symbols. A user whose params happen to contain a string key "file" is
+      # sending payload, and payload keeps truncating normally.
+      it "does not floor a user's string-keyed params that collide by name" do
+        # Longer than max_size (4), so an untouched value MUST come back cut.
+        out = truncator_for([{ 'file' => 'bcdefgh', 'type' => 'wxyzabc' }])[0]
+
+        expect(out['file']).to eq("bcde#{Celerbrake::Truncator::TRUNCATED}")
+        expect(out['type']).to eq("wxyz#{Celerbrake::Truncator::TRUNCATED}")
+      end
+
       def truncator_for(obj)
         described_class.new(max_size).truncate(obj)
       end

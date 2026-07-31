@@ -129,16 +129,17 @@ module Celerbrake
       truncated_hash.freeze
     end
 
-    # Only a String value is floored. `type`, `file` and `function` are strings
-    # in every notice this gem builds (NestedException#as_json, Backtrace.parse),
-    # so anything else here is a caller doing something unexpected — and it goes
-    # down the ordinary path rather than through a branch written for strings.
+    # SYMBOL keys only, deliberately. `NestedException#as_json` and
+    # `Backtrace.parse` always emit these as Symbols, so a Symbol match hits
+    # exactly the gem's own identity fields. Coercing (`key.to_s.to_sym`) would
+    # also match a user's params containing a STRING key `"file"` — that is
+    # their payload, not our identity, and it should keep truncating normally.
+    #
+    # No rescue is needed: `Array#include?` on a frozen Symbol array cannot
+    # raise for any key type, which matters because this runs while the host
+    # app is ALREADY handling an exception.
     def identity_key?(key)
-      IDENTITY_KEYS.include?(key) || IDENTITY_KEYS.include?(key.to_s.to_sym)
-    rescue NoMethodError
-      # A key that cannot be coerced is not an identity key. This runs while the
-      # host app is ALREADY handling an exception; it must never raise.
-      false
+      IDENTITY_KEYS.include?(key)
     end
 
     def truncate_identity_string(str)
