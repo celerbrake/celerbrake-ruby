@@ -25,6 +25,42 @@ module Celerbrake
     # @return [Array<Class>] The types that can contain references to itself
     CIRCULAR_TYPES = [Array, Hash, Set].freeze
 
+    # @return [Array<Symbol,String>] hash keys that carry the IDENTITY of an
+    #   error rather than its payload. Cutting these does not lose detail — it
+    #   changes which bug the server thinks it is looking at.
+    #
+    # `Notice#to_json` HALVES `max_size` (10000, 5000, … 39, 19, 9, 4, 2, 1)
+    # until the whole notice fits `MAX_NOTICE_SIZE`, so the cut point measures
+    # how big the payload happened to be, not anything about the error. The
+    # server fingerprints on exception class + top app frame's file + function,
+    # so a payload-driven cut silently mints a NEW error group — and each new
+    # group fires `error_group.new` and opens an autonomous triage task.
+    #
+    # Measured on a real Celerbrake install (2026-07-31): ONE
+    # `ActiveRecord::DatabaseConnectionError` existed as FOUR groups —
+    # `ActiveRecord::Datab[Truncated]` (10,157 occurrences),
+    # `ActiveRec[Truncated]` (2,438), `Acti[Truncated]` (1,155), and one whose
+    # class was intact but whose FILE was cut one character early
+    # (16,011) — that last being larger than the other three combined.
+    # `function` is included on the same reasoning; it is a fingerprint input too.
+    IDENTITY_KEYS = %i[type file function].freeze
+
+    # @return [Integer] the smallest `max_size` ever applied to an IDENTITY_KEY.
+    #
+    # A floor, deliberately NOT an exemption: a key that can never be truncated
+    # is a key that can be arbitrarily large, and this runs on the error path of
+    # every application that installs the gem. Above the floor these keys shrink
+    # normally, so a pathological 100 KB class name is still bounded.
+    #
+    # 256 is ~2.3x the longest real value observed across 148 production error
+    # groups (exception class max 48 / avg 23; top frame file max 113 / avg 40).
+    #
+    # This CANNOT stop `Notice#to_json` converging: the notice shrinks by
+    # dropping array elements and hash entries as well as by cutting strings, and
+    # both of those still follow `max_size` all the way down. At budget 1 a
+    # backtrace keeps one frame and a hash one key, floor or no floor.
+    IDENTITY_FLOOR = 256
+
     # @param [Integer] max_size maximum size of hashes, arrays and strings
     def initialize(max_size)
       @max_size = max_size
@@ -83,10 +119,34 @@ module Celerbrake
       hash.each_with_index do |(key, val), idx|
         break if idx + 1 > @max_size
 
-        truncated_hash[key] = truncate(val, seen)
+        truncated_hash[key] = if identity_key?(key) && val.is_a?(String)
+                                truncate_identity_string(val)
+                              else
+                                truncate(val, seen)
+                              end
       end
 
       truncated_hash.freeze
+    end
+
+    # Only a String value is floored. `type`, `file` and `function` are strings
+    # in every notice this gem builds (NestedException#as_json, Backtrace.parse),
+    # so anything else here is a caller doing something unexpected — and it goes
+    # down the ordinary path rather than through a branch written for strings.
+    def identity_key?(key)
+      IDENTITY_KEYS.include?(key) || IDENTITY_KEYS.include?(key.to_s.to_sym)
+    rescue NoMethodError
+      # A key that cannot be coerced is not an identity key. This runs while the
+      # host app is ALREADY handling an exception; it must never raise.
+      false
+    end
+
+    def truncate_identity_string(str)
+      fixed_str = replace_invalid_characters(str)
+      floor = @max_size > IDENTITY_FLOOR ? @max_size : IDENTITY_FLOOR
+      return fixed_str if fixed_str.length <= floor
+
+      (fixed_str.slice(0, floor) + TRUNCATED).freeze
     end
 
     def truncate_array(array, seen)

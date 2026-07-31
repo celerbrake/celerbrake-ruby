@@ -242,12 +242,18 @@ RSpec.describe Celerbrake::Truncator do
     context "given an array with hashes and hash-like objects with identical keys" do
       let(:hashie) { Class.new(Hash) }
 
+      # `data` is deliberately NOT one of Truncator::IDENTITY_KEYS. This example
+      # is about hash-like objects with identical keys, not about truncation
+      # policy. It previously used `file`, which is now floored at
+      # IDENTITY_FLOOR and would no longer truncate at max_size 3 — an
+      # incidental collision that would have left the example silently not
+      # testing the thing it is named for.
       let(:object) do
         {
           errors: [
-            { file: 'a' },
-            { file: 'a' },
-            hashie.new.merge(file: 'bcde'),
+            { data: 'a' },
+            { data: 'a' },
+            hashie.new.merge(data: 'bcde'),
           ],
         }
       end
@@ -255,12 +261,54 @@ RSpec.describe Celerbrake::Truncator do
       it "truncates values" do
         expect(truncator).to eq(
           errors: [
-            { file: 'a' },
-            { file: 'a' },
-            hashie.new.merge(file: 'bcd[Truncated]'),
+            { data: 'a' },
+            { data: 'a' },
+            hashie.new.merge(data: 'bcd[Truncated]'),
           ],
         )
         expect(truncator).to be_frozen
+      end
+    end
+
+    # Identity keys carry WHICH BUG this is, not how much detail we kept.
+    # Cutting them makes the server fingerprint a payload-size artifact as a
+    # brand-new error group, which fires an alert and opens a triage task.
+    context "given the identity keys of an error" do
+      let(:max_size) { 4 }
+
+      let(:klass) { 'ActiveRecord::DatabaseConnectionError' }
+      let(:path)  { '/GEM_ROOT/gems/activerecord-8.1.3/lib/active_record/x.rb' }
+
+      let(:object) do
+        [{ type: klass, message: 'm' * 50, backtrace: [{ file: path, line: 42, function: 'connect' }] }]
+      end
+
+      it "keeps type, file and function whole at a budget that would shred them" do
+        error = truncator[0]
+
+        expect(error[:type]).to eq(klass)
+        expect(error[:backtrace][0][:file]).to eq(path)
+        expect(error[:backtrace][0][:function]).to eq('connect')
+      end
+
+      it "still truncates everything that is not an identity key" do
+        expect(truncator[0][:message]).to eq("#{'m' * 4}[Truncated]")
+      end
+
+      it "floors identity keys rather than exempting them, so they stay bounded" do
+        huge = truncator_for([{ type: 'Z' * 100_000 }])[0][:type]
+
+        expect(huge.length).to eq(Celerbrake::Truncator::IDENTITY_FLOOR + Celerbrake::Truncator::TRUNCATED.length)
+      end
+
+      it "does not raise on identity values that are not strings" do
+        [nil, 42, :sym, [1, 2], { a: 1 }, Object.new].each do |value|
+          expect { truncator_for([{ type: value, file: value, function: value }]) }.not_to raise_error
+        end
+      end
+
+      def truncator_for(obj)
+        described_class.new(max_size).truncate(obj)
       end
     end
   end
