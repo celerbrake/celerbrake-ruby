@@ -4,6 +4,7 @@ module Celerbrake
   #
   # @api private
   # @since v1.0.0
+  # rubocop:disable Metrics/ClassLength
   class Truncator
     # @return [Hash] the options for +String#encode+
     ENCODING_OPTIONS = { invalid: :replace, undef: :replace }.freeze
@@ -294,16 +295,24 @@ module Celerbrake
       hash.each_with_index do |(key, val), idx|
         break if idx + 1 > @max_size
 
-        truncated_hash[key] = if identity && identity_key?(key) && val.is_a?(String)
-                                truncate_identity_string(val)
-                              elsif identity && key == BACKTRACE_KEY && val.is_a?(Array)
-                                truncate_scoped_backtrace(val, seen)
-                              else
-                                truncate_scoped(val, seen, identity)
-                              end
+        truncated_hash[key] = truncate_hash_value(key, val, seen, identity)
       end
 
       truncated_hash.freeze
+    end
+
+    # One place decides what a key means inside the gem-authored subtree:
+    # an IDENTITY_KEYS string gets the floor, the BACKTRACE_KEY array gets
+    # frame retention, and everything else — including both of those shapes
+    # outside identity scope — truncates exactly as it always has.
+    def truncate_hash_value(key, val, seen, identity)
+      if identity && identity_key?(key) && val.is_a?(String)
+        truncate_identity_string(val)
+      elsif identity && key == BACKTRACE_KEY && val.is_a?(Array)
+        truncate_scoped_backtrace(val, seen)
+      else
+        truncate_scoped(val, seen, identity)
+      end
     end
 
     # Only reached when `identity` is true, i.e. under the gem-authored subtree.
@@ -385,7 +394,14 @@ module Celerbrake
     def in_app_frame?(frame)
       return false unless frame.is_a?(Hash)
 
-      file = frame['file'] || frame[:file]
+      # A Hash subclass with an exotic #[] can raise; same degradation.
+      in_app_file?(frame['file'] || frame[:file])
+    rescue StandardError
+      false
+    end
+
+    # The server's `SourceLocation.in_app?`, clause for clause.
+    def in_app_file?(file)
       return false unless file.is_a?(String)
       return true if file.start_with?(IN_APP_PREFIX)
       return false if file.start_with?(GEM_ROOT_PREFIX)
@@ -421,4 +437,5 @@ module Celerbrake
       temp_str.encode!('utf-8', **ENCODING_OPTIONS)
     end
   end
+  # rubocop:enable Metrics/ClassLength
 end
