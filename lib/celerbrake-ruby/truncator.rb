@@ -112,6 +112,16 @@ module Celerbrake
     #   band <= 2 x ((IDENTITY_FLOOR + TRUNCATED.length) - (2 + TRUNCATED.length))
     #        =  2 x (IDENTITY_FLOOR - 2)  =  508 bytes
     #
+    # That inequality holds FOR NOTICES THIS GEM BUILT, and only because of
+    # `NestedException#as_json`'s key order — `type` first, `message` second,
+    # `backtrace` third and so already dropped at budget 2. It is NOT
+    # unconditional. Host code can reach `errors` through `Notice#[]` (see
+    # `Notice::IDENTITY_SUBTREE`; the sibling `celerbrake` gem's `logger.rb`
+    # does exactly that), and a host that REORDERS an entry's keys can leave
+    # two IDENTITY keys at the deciding rung instead of one, widening the band.
+    # This is a property of our own serializer, not a guarantee about arbitrary
+    # payloads — do not cite it as one.
+    #
     # Measured (Ruby 3.3.10, 7-char hostname, largest `root_directory` that
     # still yields a non-nil `to_json`, two-deep `cause` chain, class-name
     # length L):
