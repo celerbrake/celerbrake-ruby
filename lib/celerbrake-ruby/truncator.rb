@@ -153,6 +153,61 @@ module Celerbrake
     # drop for one fabricated error group. `truncator_spec` pins the bound.
     IDENTITY_FLOOR = 256
 
+    # @return [Symbol] the one key under {Notice::IDENTITY_SUBTREE} whose value
+    #   is an ARRAY the fingerprint reads — `Backtrace.parse`'s frame list.
+    #
+    # {IDENTITY_KEYS} protects the identity STRINGS from being cut at a
+    # payload-dependent point; this protects the identity FRAME from being
+    # dropped outright, which is the other mechanism (see the IDENTITY_KEYS
+    # comment: FRAME DROPPING) and the one a string floor cannot touch. The
+    # server keys on its *top app frame* — `frames.find { in_app? } ||
+    # frames.first` — and on the real production payloads that frame sits at
+    # 1-based ordinal 49–53, so every slice below ~78 deletes it and the
+    # server falls back to the first GEM frame: a fingerprint that measures
+    # how big the payload happened to be. Sampling the five groups one bug
+    # produced: only the uncut group (69) retains an in-app frame at all
+    # (1377/1377); the cut ones (67/68/70/71) retain none (0/623) and their
+    # frame counts are exactly the ladder's rungs (9/19/39/4).
+    #
+    # So when slicing THIS array would drop the first in-app frame,
+    # {#truncate_backtrace} keeps it as the LAST element of the slice instead
+    # of the frame that occupied that position. Relative order is preserved by
+    # construction (the retained frame's ordinal exceeds every kept frame's),
+    # the element count still follows `max_size` exactly — so convergence of
+    # `Notice#to_json` is untouched — and the swapped-out frame is provably
+    # not the fingerprint's (it is neither in-app nor `frames.first`). At
+    # budget 2, the state that decides delivery-vs-drop, an error hash keeps
+    # only its first two keys (`type`, `message`) and `backtrace` is already
+    # gone, so this cannot move the documented IDENTITY_FLOOR drop band.
+    #
+    # Everything here is a NO-OP — byte-identical to the unfixed truncator —
+    # unless all of: identity scope (the gem-authored subtree), the Symbol key
+    # `:backtrace` (a String-keyed "backtrace" was put there by host code and
+    # is data), an Array value, the array actually being sliced, and the first
+    # in-app frame lying beyond the cut. {#in_app_frame?} mirrors the server's
+    # `SourceLocation.in_app?` byte-for-byte over the values the notifier's
+    # own filters produce (`RootDirectoryFilter` rewrites the configured root
+    # to `/PROJECT_ROOT` and runs in the filter chain, i.e. BEFORE `to_json`
+    # triggers truncation — ordering verified, not assumed), and it must
+    # never raise while the host app is already handling an exception: any
+    # surprise (a frame that is not a Hash, a file that is not a String, an
+    # encoding that a regexp cannot scan) makes the frame "not in-app" and
+    # degrades to the plain slice the unfixed gem performed.
+    BACKTRACE_KEY = :backtrace
+
+    # @return [String] the prefix the notifier's own RootDirectoryFilter
+    #   writes; the server treats it as proof of an app frame.
+    IN_APP_PREFIX = '/PROJECT_ROOT/'.freeze
+
+    # @return [String] the prefix GemRootFilter writes; the server treats it
+    #   as proof of a vendor frame.
+    GEM_ROOT_PREFIX = '/GEM_ROOT/'.freeze
+
+    # @return [Regexp] the server's fallback vendor test for unrewritten
+    #   paths (SourceLocation::GEM_PATTERN) — load-bearing for hosts whose
+    #   filters were removed or whose paths escaped the root rewrite.
+    VENDOR_FRAME_PATTERN = %r{/(gems|vendor)/}.freeze
+
     # @param [Integer] max_size maximum size of hashes, arrays and strings
     def initialize(max_size)
       @max_size = max_size
@@ -241,6 +296,8 @@ module Celerbrake
 
         truncated_hash[key] = if identity && identity_key?(key) && val.is_a?(String)
                                 truncate_identity_string(val)
+                              elsif identity && key == BACKTRACE_KEY && val.is_a?(Array)
+                                truncate_scoped_backtrace(val, seen)
                               else
                                 truncate_scoped(val, seen, identity)
                               end
@@ -284,6 +341,59 @@ module Celerbrake
         .slice(0, @max_size)
         .map! { |elem| truncate_scoped(elem, seen, identity) }
         .freeze
+    end
+
+    # The circular-reference guard {#truncate_scoped} applies to every
+    # container, restated for the backtrace path so a backtrace array that
+    # appears twice in one `errors` tree behaves exactly as it does today.
+    def truncate_scoped_backtrace(frames, seen)
+      return CIRCULAR if seen.include?(frames.object_id)
+
+      truncate_backtrace(frames, seen << frames.object_id)
+    end
+
+    # {#truncate_array} with one difference, documented at {BACKTRACE_KEY}:
+    # if the plain slice would drop the first in-app frame — the one the
+    # server's fingerprint reads — that frame is kept as the slice's last
+    # element. Same element count, same relative order, same per-frame
+    # truncation as every other frame.
+    def truncate_backtrace(frames, seen)
+      slice_retaining_in_app_frame(frames)
+        .map! { |frame| truncate_scoped(frame, seen, true) }
+        .freeze
+    end
+
+    def slice_retaining_in_app_frame(frames)
+      sliced = frames.slice(0, @max_size)
+      return sliced if frames.size <= @max_size || sliced.empty?
+
+      index = frames.find_index { |frame| in_app_frame?(frame) }
+      return sliced if index.nil? || index < @max_size
+
+      sliced[-1] = frames[index]
+      sliced
+    end
+
+    # Mirrors the server's frame test — `SourceLocation.in_app?` over
+    # `parse_frame(f)["file"]` — for the one purpose of predicting which
+    # frame the fingerprint will read. Narrowed to Hash frames on purpose:
+    # the gem's own `Backtrace.parse` emits only Hashes, a String frame was
+    # set by host code and simply keeps today's plain-slice behaviour. Reads
+    # `"file"` before `:file` because the server does. Never raises: an
+    # unscannable value (wrong type, incompatible or invalid encoding) is
+    # "not in-app", which degrades to the unfixed gem's slice.
+    def in_app_frame?(frame)
+      return false unless frame.is_a?(Hash)
+
+      file = frame['file'] || frame[:file]
+      return false unless file.is_a?(String)
+      return true if file.start_with?(IN_APP_PREFIX)
+      return false if file.start_with?(GEM_ROOT_PREFIX)
+      return false if file.strip.empty?
+
+      !file.match?(VENDOR_FRAME_PATTERN)
+    rescue StandardError
+      false
     end
 
     def truncate_set(set, seen, identity)

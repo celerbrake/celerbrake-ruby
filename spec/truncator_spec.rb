@@ -386,6 +386,160 @@ RSpec.describe Celerbrake::Truncator do
       end
     end
 
+    # Frame retention. The identity floor stops the ladder from CUTTING the
+    # strings the fingerprint reads; this stops it from DROPPING the frame
+    # they live on. The server keys on its top app frame (`frames.find {
+    # in_app? } || frames.first`), which sits at ordinal 49-53 on the real
+    # production payloads, so a plain slice below ~78 deletes it and the key
+    # becomes a function of the payload's size. When slicing a gem-authored
+    # backtrace would drop the FIRST in-app frame, it is kept as the slice's
+    # last element instead — same element count, same relative order (its
+    # ordinal exceeds every kept frame's), and the frame it displaces is
+    # provably not the fingerprint's (neither in-app nor frames.first).
+    context "given a backtrace inside the gem-authored subtree" do
+      let(:app_frame) do
+        { file: '/PROJECT_ROOT/app/controllers/api/v3/base_controller.rb',
+          line: 13, function: 'db_check' }
+      end
+
+      def gem_frame(i)
+        { file: "/GEM_ROOT/gems/activerecord-8.1.3/lib/active_record/f#{i}.rb",
+          line: i, function: "m#{i}" }
+      end
+
+      def frames_with_app_at(index, total = 100)
+        frames = Array.new(total) { |i| gem_frame(i) }
+        frames[index] = app_frame
+        frames
+      end
+
+      def sliced_backtrace(budget, frames)
+        described_class.new(budget)
+                       .truncate_identity_subtree([{ type: 'T', backtrace: frames }])[0][:backtrace]
+      end
+
+      # THE REGRESSION, at the exact rungs that minted production groups
+      # 70/68/67/71 (39/19/9/4 frames, 0 of 623 sampled occurrences with an
+      # in-app frame, against 1377/1377 in the uncut group 69).
+      it "keeps the first in-app frame when the slice would drop it" do
+        [39, 19, 9, 4].each do |budget|
+          out = sliced_backtrace(budget, frames_with_app_at(52))
+
+          expect(out.size).to eq(budget)
+          expect(out.last[:file]).to eq(app_frame[:file])
+          expect(out[0...-1]).to eq(out[0...-1].sort_by { |f| f[:line] })
+        end
+      end
+
+      it "keeps the FIRST in-app frame — the one the server fingerprints on" do
+        frames = frames_with_app_at(52)
+        frames[60] = { file: '/PROJECT_ROOT/app/models/later.rb',
+                       line: 1, function: 'other' }
+
+        out = sliced_backtrace(39, frames)
+
+        expect(out.last[:file]).to eq(app_frame[:file])
+      end
+
+      it "applies the identity floor to the retained frame like any other" do
+        frames = frames_with_app_at(52)
+        frames[52] = { file: "/PROJECT_ROOT/#{'p' * 400}.rb", line: 1, function: 'f' }
+
+        out = sliced_backtrace(4, frames)
+
+        expect(out.last[:file].length)
+          .to eq(Celerbrake::Truncator::IDENTITY_FLOOR +
+                 Celerbrake::Truncator::TRUNCATED.length)
+      end
+
+      # The server's fallback rule for paths its placeholders never rewrote:
+      # anything not matching %r{/(gems|vendor)/} is an app frame. A host
+      # whose RootDirectoryFilter was removed still fingerprints on that.
+      it "treats a bare un-rewritten application path as in-app, as the server does" do
+        frames = frames_with_app_at(52)
+        frames[52] = { file: '/home/deploy/apps/shop/app/models/order.rb',
+                       line: 7, function: 'total' }
+
+        out = sliced_backtrace(19, frames)
+
+        expect(out.last[:file]).to eq('/home/deploy/apps/shop/app/models/order.rb')
+      end
+
+      # CONTROLS — behaviour that must be byte-identical to the unfixed gem.
+      it "is the plain slice when the in-app frame already survives" do
+        out = sliced_backtrace(78, frames_with_app_at(52))
+
+        expect(out.size).to eq(78)
+        expect(out.last[:file]).to eq(gem_frame(77)[:file])
+      end
+
+      it "is the plain slice when no frame is in-app" do
+        frames = Array.new(100) { |i| gem_frame(i) }
+        frames[52] = { file: '/app/vendor/bundle/ruby/3.4.0/gems/x/lib/y.rb',
+                       line: 1, function: 'z' }
+        frames[53] = { file: '   ', line: 1, function: 'blank' }
+
+        out = sliced_backtrace(39, frames)
+
+        expect(out.last[:file]).to eq(gem_frame(38)[:file])
+      end
+
+      it "leaves a :backtrace in an unmarked (host) payload alone" do
+        out = described_class.new(39)
+                             .truncate(rows: [{ backtrace: frames_with_app_at(52) }])
+
+        bt = out[:rows][0][:backtrace]
+        expect(bt.size).to eq(39)
+        # No retention: the app frame at index 52 is simply gone, and the last
+        # element is the 39th frame (strings cut at the budget — no floor
+        # in host data either, which "given the identity keys" already pins).
+        expect(bt.last[:file]).to start_with('/GEM_ROOT/')
+        expect(bt.map { |f| f[:file] }).not_to include(app_frame[:file])
+      end
+
+      it "leaves a String-keyed 'backtrace' alone — host data, not identity" do
+        out = described_class.new(39)
+                             .truncate_identity_subtree([{ 'backtrace' => frames_with_app_at(52) }])
+
+        expect(out[0]['backtrace'].last[:file]).to eq(gem_frame(38)[:file])
+      end
+
+      it "reads a String 'file' key off a frame, as the server's parser does" do
+        frames = frames_with_app_at(52)
+        frames[52] = { 'file' => '/PROJECT_ROOT/app/models/order.rb' }
+
+        out = sliced_backtrace(19, frames)
+
+        # Retention reads the String key (the server does); the floor still
+        # does not — a String-keyed value is host data and cuts at the budget.
+        expect(out.last['file']).to start_with('/PROJECT_ROOT/')
+      end
+
+      it "does not raise on frames of any shape, and declines them all" do
+        odd = [nil, 42, :sym, [1], Object.new,
+               'app/models/order.rb:12:in `total\'',
+               { file: nil }, { file: 12 }, { line: 3 },
+               { file: (+"/PROJECT\xff_ROOT/x.rb").force_encoding('UTF-8') },
+               { file: '/x.rb'.encode('UTF-16LE') }]
+        frames = Array.new(100) { |i| gem_frame(i) }
+        odd.each_with_index { |f, i| frames[40 + i] = f }
+
+        out = nil
+        expect { out = sliced_backtrace(9, frames) }.not_to raise_error
+        expect(out.size).to eq(9)
+        expect(out.last[:file]).to eq(gem_frame(8)[:file])
+      end
+
+      it "still reports a backtrace array that appears twice as circular" do
+        frames = frames_with_app_at(52)
+        errors = [{ type: 'A', backtrace: frames }, { type: 'B', backtrace: frames }]
+
+        out = described_class.new(39).truncate_identity_subtree(errors)
+
+        expect(out[1][:backtrace]).to eq(Celerbrake::Truncator::CIRCULAR)
+      end
+    end
+
     # The identity floor buys fingerprint stability with delivery headroom:
     # `Notice#context` is built once in `#initialize` and is absent from
     # TRUNCATABLE_KEYS, so a notice made almost entirely of `rootDirectory` /
