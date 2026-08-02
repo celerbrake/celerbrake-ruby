@@ -169,6 +169,31 @@ RSpec.describe Celerbrake::Notice do
           expect(frame['function']).to eq('checkout')
         end
 
+        # THE FRAME-RETENTION REGRESSION SPEC. The floor keeps the strings
+        # whole; only retention keeps the FRAME. Production groups 70/68/67/71
+        # exist because their notices were sliced to 39/19/9/4 frames and the
+        # app frame at ordinal ~52 was deleted, so the server fell back to the
+        # first gem frame and minted one error group per cut budget.
+        it "delivers the in-app frame however far the ladder descends" do
+          payload = delivered(deeply_nested_params)
+
+          # Guard the instrument: this payload must actually reach the bottom
+          # of the ladder, where a plain slice cannot contain ordinal 50.
+          expect(payload['errors'][0]['backtrace'].size).to be <= 4
+
+          expect(app_frame(payload)).not_to be_nil
+        end
+
+        # And the frame it delivers is the fingerprint's: file AND function
+        # survive whole, so the server keys this notice exactly as it keys an
+        # untruncated one.
+        it "delivers the in-app frame fingerprint-whole" do
+          frame = app_frame(delivered(deeply_nested_params))
+
+          expect(frame['file']).to eq('/PROJECT_ROOT/app/lib/services/billing/renewal.rb')
+          expect(frame['function']).to eq('charge!')
+        end
+
         # THE REGRESSION SPEC. Same payload twice; only the params' KEY NAMES
         # differ. If the floor escapes `errors`, the left-hand run inflates and
         # loses frames the right-hand run keeps.
