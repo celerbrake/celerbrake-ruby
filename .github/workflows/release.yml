@@ -1,0 +1,41 @@
+# Builds and publishes celerbrake-ruby to RubyGems via Trusted Publishing
+# (OIDC) when a version tag like `v0.1.0` is pushed.
+#
+# ── One-time setup on RubyGems.org (required before the first run) ──
+#   RubyGems → (your gem) → Trusted Publishers → add a GitHub Actions publisher:
+#     Repository: celerbrake/celerbrake-ruby
+#     Workflow:   release.yml
+#   Until the gem exists you can register a *pending* trusted publisher so the
+#   very first publish is allowed. Docs: https://guides.rubygems.org/trusted-publishing/
+#
+# Note: this publishes the default MRI (ruby-platform) gem. The JRuby variant
+# is built and pushed manually with `rake jruby:gem && gem push pkg/*-java.gem`.
+name: Release gem
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required to mint the OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ruby
+
+      # Exchanges the GitHub OIDC token for a short-lived RubyGems API key.
+      - uses: rubygems/configure-rubygems-credentials@v1
+
+      - name: Build and push
+        run: |
+          gem build celerbrake-ruby.gemspec
+          gem push celerbrake-ruby-*.gem

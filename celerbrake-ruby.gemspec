@@ -3,10 +3,10 @@ require './lib/celerbrake-ruby/version'
 Gem::Specification.new do |s|
   s.name        = 'celerbrake-ruby'
   s.version     = Celerbrake::CELERBRAKE_RUBY_VERSION.dup
-  s.summary     = 'Ruby notifier for Celerbrake (self-hosted error tracking)'
+  s.summary     = 'Ruby notifier for Celerbrake (cloud-based error tracking)'
   s.description = <<DESC
 Celerbrake Ruby is a plain Ruby notifier for Celerbrake (https://celerbrake.com),
-a self-hosted, wire-compatible error-tracking service. It provides a minimalist
+a cloud-based, wire-compatible error-tracking service. It provides a minimalist
 API for sending any Ruby exception to a Celerbrake dashboard. The library is
 extremely lightweight and suits plain Ruby applications well. For apps built with
 Rails, Sinatra or any other Rack-compliant framework we offer the celerbrake gem
@@ -39,8 +39,8 @@ DESC
 
   # base64 and logger left the default gem set in Ruby 3.4; declare them so the
   # notifier keeps working on modern Rubies.
-  s.add_dependency 'base64'
-  s.add_dependency 'logger'
+  s.add_dependency 'base64', '~> 0.1'
+  s.add_dependency 'logger', '~> 1.0'
 
   s.add_development_dependency 'rspec', '~> 3'
   s.add_development_dependency 'rspec-its', '~> 1.2'
