@@ -8,6 +8,12 @@ permissions:
 jobs:
   test:
     strategy:
+      # One job's failure must not cancel the other seven. Without this, a single
+      # red entry reports as 1 FAILURE + 7 CANCELLED and the true state of every
+      # other Ruby is unknowable — which is how a ruby-head native-extension
+      # break and an unrelated YARD lint failure both read as "CI is red" with
+      # nothing to distinguish them (2026-08-02 to 2026-09-08).
+      fail-fast: false
       matrix:
         os: [ubuntu-latest]
         ruby: [2.5, 2.6, 2.7, 3.0, 3.1, head, jruby, jruby-head]
@@ -16,6 +22,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+
+      # JRuby 10 is compiled for Java 21 and the runner image ships 17, so the
+      # JVM refuses its main class before any Ruby runs (UnsupportedClassVersion
+      # Error, class file version 65 vs 61). MRI jobs skip this step.
+      - uses: actions/setup-java@v4
+        if: startsWith(matrix.ruby, 'jruby')
+        with:
+          distribution: temurin
+          java-version: '21'
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -33,5 +48,16 @@ jobs:
       - name: Display Ruby version
         run: ruby -v
 
+      # `if` so the suite runs even when an earlier step failed. The lint steps
+      # above run first (they are cheap and fail fast), but they must never be
+      # able to HIDE test signal: a single unresolvable YARD doc link took this
+      # workflow down on 2026-08-02 and, because the Test step sits after it,
+      # the specs did not execute on main or on ANY pull request for five weeks
+      # (found 2026-09-08). Three gems the whole fleet git-sources had no test
+      # coverage running, and three dependabot PRs looked red for a reason that
+      # had nothing to do with them. The job still FAILS on a lint failure —
+      # strictness is not the problem — but the results are always reported.
+      # `success() || failure()` rather than `always()`: skip on cancellation.
       - name: Test
+        if: success() || failure()
         run: bundle exec rake

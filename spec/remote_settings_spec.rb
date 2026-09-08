@@ -92,7 +92,10 @@ RSpec.describe Celerbrake::RemoteSettings do
         allow(https).to receive(:use_ssl=).with(true)
         allow(https).to receive(:open_timeout=)
         allow(https).to receive(:read_timeout=)
-        allow(https).to receive(:write_timeout=)
+        # Same Ruby >= 2.6 guard as the assertions below and as the sender
+        # itself: with verify_partial_doubles on, stubbing a method the
+        # object does not have is an error, not a no-op.
+        allow(https).to receive(:write_timeout=) if https.respond_to?(:write_timeout=)
         allow(https).to receive(:request).and_raise(StandardError)
       end
 
@@ -223,7 +226,10 @@ RSpec.describe Celerbrake::RemoteSettings do
         https = build_https
         expect(https.open_timeout).to eq(Celerbrake::Config::DEFAULT_OPEN_TIMEOUT)
         expect(https.read_timeout).to eq(Celerbrake::Config::DEFAULT_READ_TIMEOUT)
-        expect(https.write_timeout).to eq(Celerbrake::Config::DEFAULT_WRITE_TIMEOUT)
+        # Ruby < 2.6 has no Net::HTTP#write_timeout, and the sender guards the
+        # assignment with the same respond_to? check — so assert it only where
+        # the method exists, rather than dropping the gem's honest >= 2.5 claim.
+        expect(https.write_timeout).to eq(Celerbrake::Config::DEFAULT_WRITE_TIMEOUT) if https.respond_to?(:write_timeout)
       end
       # rubocop:enable RSpec/MultipleExpectations
     end
@@ -236,7 +242,10 @@ RSpec.describe Celerbrake::RemoteSettings do
         https = build_https
         expect(https.open_timeout).to eq(21)
         expect(https.read_timeout).to eq(21)
-        expect(https.write_timeout).to eq(21)
+        # Ruby < 2.6 has no Net::HTTP#write_timeout, and the sender guards the
+        # assignment with the same respond_to? check — so assert it only where
+        # the method exists, rather than dropping the gem's honest >= 2.5 claim.
+        expect(https.write_timeout).to eq(21) if https.respond_to?(:write_timeout)
       end
       # rubocop:enable RSpec/MultipleExpectations
     end
