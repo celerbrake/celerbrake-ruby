@@ -15,4 +15,8 @@ gem 'ostruct' # Not a default gem on Ruby 3.5+/JRuby 10; spec_helper requires it
 # jobs the moment it was added unconditionally. Same version-guard idiom as
 # webrick above; older Rubies keep the default rdoc they already ship.
 gem 'rdoc' if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('3.5')
-gem 'yard', '0.9.45' # 0.9.28 cannot drive rdoc 8.x (ToHtml#initialize arity); see dependabot #5.
+# yard 0.9.28 cannot drive rdoc 8.x (ToHtml#initialize arity), which is the only
+# rdoc available on Ruby 4.1 — so new Rubies need 0.9.45 (dependabot #5). But
+# 0.9.45's dependency set will not resolve on Ruby 2.5's RubyGems 2.7/Bundler
+# 2.3. One version cannot span 2.5 to 4.1; pick per Ruby, as with rdoc above.
+gem 'yard', Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('2.6') ? '0.9.45' : '0.9.28'
