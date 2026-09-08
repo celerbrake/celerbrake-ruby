@@ -8,6 +8,12 @@ permissions:
 jobs:
   test:
     strategy:
+      # One job's failure must not cancel the other seven. Without this, a single
+      # red entry reports as 1 FAILURE + 7 CANCELLED and the true state of every
+      # other Ruby is unknowable — which is how a ruby-head native-extension
+      # break and an unrelated YARD lint failure both read as "CI is red" with
+      # nothing to distinguish them (2026-08-02 to 2026-09-08).
+      fail-fast: false
       matrix:
         os: [ubuntu-latest]
         ruby: [2.5, 2.6, 2.7, 3.0, 3.1, head, jruby, jruby-head]
