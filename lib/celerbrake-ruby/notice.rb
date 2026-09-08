@@ -60,7 +60,8 @@ module Celerbrake
     #   protects — not the accidental collision that scoping exists to stop
     #   (a host symbol-keying its own `:type`/`:file` in `params`, which no
     #   longer reaches the floor at all). The floor is a floor and not an
-    #   exemption, so the worst case is bounded: {IDENTITY_FLOOR} characters,
+    #   exemption, so the worst case is bounded:
+    #   {Celerbrake::Truncator::IDENTITY_FLOOR} characters,
     #   up to ~1 KB of 4-byte UTF-8, per identity-named string. And the
     #   consequence of abusing it is the branch's already-documented failure
     #   mode — an inflated `errors` subtree converges one rung lower on the
