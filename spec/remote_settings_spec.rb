@@ -92,7 +92,10 @@ RSpec.describe Celerbrake::RemoteSettings do
         allow(https).to receive(:use_ssl=).with(true)
         allow(https).to receive(:open_timeout=)
         allow(https).to receive(:read_timeout=)
-        allow(https).to receive(:write_timeout=)
+        # Same Ruby >= 2.6 guard as the assertions below and as the sender
+        # itself: with verify_partial_doubles on, stubbing a method the
+        # object does not have is an error, not a no-op.
+        allow(https).to receive(:write_timeout=) if https.respond_to?(:write_timeout=)
         allow(https).to receive(:request).and_raise(StandardError)
       end
 

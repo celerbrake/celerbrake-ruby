@@ -23,6 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      # JRuby 10 is compiled for Java 21 and the runner image ships 17, so the
+      # JVM refuses its main class before any Ruby runs (UnsupportedClassVersion
+      # Error, class file version 65 vs 61). MRI jobs skip this step.
+      - uses: actions/setup-java@v4
+        if: startsWith(matrix.ruby, 'jruby')
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
