@@ -397,7 +397,10 @@ RSpec.describe Celerbrake::SyncSender do
         https = build_https
         expect(https.open_timeout).to eq(Celerbrake::Config::DEFAULT_OPEN_TIMEOUT)
         expect(https.read_timeout).to eq(Celerbrake::Config::DEFAULT_READ_TIMEOUT)
-        expect(https.write_timeout).to eq(Celerbrake::Config::DEFAULT_WRITE_TIMEOUT)
+        # Ruby < 2.6 has no Net::HTTP#write_timeout, and the sender guards the
+        # assignment with the same respond_to? check — so assert it only where
+        # the method exists, rather than dropping the gem's honest >= 2.5 claim.
+        expect(https.write_timeout).to eq(Celerbrake::Config::DEFAULT_WRITE_TIMEOUT) if https.respond_to?(:write_timeout)
       end
       # rubocop:enable RSpec/MultipleExpectations
     end
@@ -410,7 +413,10 @@ RSpec.describe Celerbrake::SyncSender do
         https = build_https
         expect(https.open_timeout).to eq(21)
         expect(https.read_timeout).to eq(21)
-        expect(https.write_timeout).to eq(21)
+        # Ruby < 2.6 has no Net::HTTP#write_timeout, and the sender guards the
+        # assignment with the same respond_to? check — so assert it only where
+        # the method exists, rather than dropping the gem's honest >= 2.5 claim.
+        expect(https.write_timeout).to eq(21) if https.respond_to?(:write_timeout)
       end
       # rubocop:enable RSpec/MultipleExpectations
     end
