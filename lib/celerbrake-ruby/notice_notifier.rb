@@ -84,7 +84,7 @@ module Celerbrake
 
     # @return [Boolean]
     # @since v4.14.0
-    def has_filter?(filter_class) # rubocop:disable Naming/PredicateName
+    def has_filter?(filter_class) # rubocop:disable Naming/PredicatePrefix
       @filter_chain.includes?(filter_class)
     end
 

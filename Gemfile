@@ -1,9 +1,21 @@
 source 'https://rubygems.org'
 gemspec
 
-gem 'rubocop', '~> 1.16', require: false
-gem 'rubocop-rake', '~> 0.5', require: false
-gem 'rubocop-rspec', '~> 2.3', require: false
+# RuboCop runs in its own `lint` job on one Ruby, not across the test matrix:
+# each Ruby in the matrix re-resolves the lockfile and lands on a different
+# rubocop (1.28 on Ruby 2.5, 1.91 on 3.4), and no single `.rubocop_todo.yml`
+# can be valid for both. rubocop-rspec 3 and rubocop 1.91 both require Ruby
+# 2.7, so guard them the same way webrick, rdoc and yard are guarded below,
+# or `bundle install` fails outright on the 2.5 and 2.6 jobs.
+if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new('2.7')
+  gem 'rubocop', '~> 1.91', require: false
+  gem 'rubocop-rake', '~> 0.7', require: false
+  # rubocop-rspec 2.x drags in rubocop-rspec_rails 2.29, which calls
+  # `ConfigLoader.inject_defaults!` with a project root; rubocop 1.91 refuses
+  # that and aborts before inspecting a single file. 3.x dropped the
+  # dependency entirely.
+  gem 'rubocop-rspec', '~> 3.0', require: false
+end
 
 gem 'simplecov', '~> 0.16', require: false
 

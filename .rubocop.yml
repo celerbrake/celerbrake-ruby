@@ -1,4 +1,6 @@
-require:
+inherit_from: .rubocop_todo.yml
+
+plugins:
   - rubocop-rake
   - rubocop-rspec
 
@@ -13,6 +15,12 @@ AllCops:
     - 'vendor/**/*'
     - 'spec/fixtures/**/*'
   NewCops: enable
+
+# This gem declares its development dependencies in the GEMSPEC on purpose:
+# inherited shape from airbrake-ruby, and it keeps `gem build` self-describing.
+# Same call as the sibling celerbrake gem.
+Gemspec/DevelopmentDependencies:
+  Enabled: false
 
 Metrics/MethodLength:
   Max: 25
@@ -43,7 +51,7 @@ Style/NumericLiterals:
 Style/SignalException:
   EnforcedStyle: only_raise
 
-Naming/PredicateName:
+Naming/PredicatePrefix:
   Exclude:
     - 'lib/celerbrake-ruby/async_sender.rb'
     - 'lib/celerbrake-ruby/thread_pool.rb'
@@ -127,7 +135,10 @@ RSpec/MultipleExpectations:
 RSpec/ContextWording:
   Enabled: false
 
-RSpec/FilePath:
+RSpec/SpecFilePathFormat:
+  Enabled: false
+
+RSpec/SpecFilePathSuffix:
   Enabled: false
 
 RSpec/NestedGroups:

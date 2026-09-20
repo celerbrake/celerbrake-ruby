@@ -3,6 +3,34 @@ Celerbrake Ruby Changelog
 
 ### master
 
+- **Backtrace frames no longer come out quoted on Ruby 3.4.** Ruby 3.4
+  replaced the opening backtick in a backtrace line with a single quote and
+  started qualifying the label with its owner
+  (`:in 'User#magic'`, not ``:in `magic'``). `Backtrace::Patterns::RUBY`
+  still required the backtick, so every frame on Ruby 3.4 fell through to the
+  generic fallback, which captures the quotes as part of the name: every
+  `function` in every notice read `"'User#magic'"`. The fleet runs Ruby 3.4,
+  so this affected every error reported by every app. Found while adding
+  3.2 to 3.4 to CI.
+- **CI runs on the Ruby the fleet deploys.** The test matrix had no 3.2, 3.3 or
+  3.4 entry, so the Ruby this gem actually ships on was the one Ruby it never
+  tested. All three added.
+- **RuboCop now actually runs.** The lint step sat behind
+  `if [[ "$RUBY_ENGINE" == "ruby" ]]`, a guard meant to skip JRuby.
+  `RUBY_ENGINE` is a Ruby constant, not a shell variable, so the test was false
+  on every entry and rubocop had never inspected a file while reporting green.
+  It now runs in its own job on Ruby 3.4 (each matrix Ruby re-resolves the
+  gitignored lockfile onto a different rubocop, so one config cannot serve
+  them all), with `rubocop-rspec` bumped to 3.x and the 243 pre-existing
+  offences enumerated in a generated `.rubocop_todo.yml` rather than hidden.
+- **JRuby dropped from CI.** `rbtree-jruby` 0.2 is a Java extension that JRuby
+  10.1 refuses to load (`ClassFormatError: Duplicate method name "call"` in
+  `MultiRBTree$INVOKER$i$op_aset`), so 0 examples ran on `jruby` and
+  `jruby-head`. Nothing in the fleet runs JRuby; `rake jruby:gem` still builds
+  the variant.
+- **ruby-head no longer fails the workflow**, only its own job, and the thread
+  filter spec no longer assumes a thread variable set to `nil` is retained
+  (Ruby 4.1 drops it, the way `Thread#[]=` always has).
 - **Notify never blocks the host app.** `ThreadPool#<<` now pushes
   non-blockingly: the old check-then-push allowed two request threads to both
   observe a nearly-full queue and both push, leaving the loser asleep inside
