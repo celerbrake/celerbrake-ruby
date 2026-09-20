@@ -15,10 +15,9 @@ more.
 > **Heritage.** Celerbrake Ruby began life as a fork of
 > [airbrake-ruby][airbrake-ruby] (v6.2.1) and stays wire-compatible with the
 > Airbrake v3 `create-notice` API. The substantive difference is that the
-> default reporting host is `https://api.celerbrake.com` instead of a
-> third-party service, so you control the whole pipeline. We are grateful to
-> Airbrake Technologies, Inc. for the original, MIT-licensed work — see
-> [LICENSE.md](LICENSE.md).
+> reporting host is a Celerbrake instance you run, not a third-party service, so
+> you control the whole pipeline. We are grateful to Airbrake Technologies, Inc.
+> for the original, MIT-licensed work — see [LICENSE.md](LICENSE.md).
 
 ## Installation
 
@@ -59,7 +58,8 @@ Celerbrake.configure do |c|
   c.project_id  = 123
   c.project_key = 'fa0123456789abcdef0123456789abcd'
 
-  # Defaults to https://api.celerbrake.com. Point this at your own instance.
+  # Always set this: point it at your own instance, e.g. https://celerbrake.com.
+  # The built-in default is stale (see the note under the table below).
   c.host = 'https://errors.example.com'
 
   # Report only from these environments.
@@ -74,13 +74,22 @@ end
 | --- | --- | --- |
 | `project_id` | `nil` | Numeric project id from the Celerbrake admin page. **Required.** |
 | `project_key` | `nil` | Project API key from the Celerbrake admin page. **Required.** |
-| `host` | `https://api.celerbrake.com` | Base URL of the Celerbrake instance receiving notices. |
+| `host` | `https://api.celerbrake.com` (stale, see below) | Base URL of the Celerbrake instance receiving notices. **Always set it.** |
 | `environment` | `nil` | Current environment name (e.g. `production`). |
 | `ignore_environments` | `[]` | Environments from which notices are dropped. |
 | `root_directory` | app root | Used to trim and group backtrace frames. |
 | `blocklist_keys` | `[]` | Keys whose values are redacted before sending. |
 | `allowlist_keys` | `[]` | If set, only these keys are sent; everything else is redacted. |
 | `remote_config` | `false` | Off by default — Celerbrake does not serve a remote-config endpoint. |
+
+> **About the `host` default.** The value hardcoded in `Celerbrake::Config`
+> (`error_host` / `apm_host` in `lib/celerbrake-ruby/config.rb`,
+> `https://api.celerbrake.com`) is a leftover from the fork and **no longer
+> resolves**. Nothing warns you: an unconfigured notifier simply reports into a
+> DNS hole. Set `c.host` to your own instance (`https://celerbrake.com` for the
+> Nanza platform's). Changing the default in the gem is a separate decision,
+> because it means a lockfile bump and a redeploy for every app on the fleet, so
+> until that happens this README documents the default as it actually is.
 
 ## Operational behavior
 
