@@ -1,44 +1,76 @@
 name: celerbrake-ruby
 
-on: [push]
+on:
+  push:
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
+  # RuboCop runs here, on ONE Ruby, and not inside the matrix below. It used to
+  # sit in the matrix behind `if [[ "$RUBY_ENGINE" == "ruby" ]]`, a guard meant
+  # to skip JRuby. `RUBY_ENGINE` is a Ruby constant, not a shell variable, and
+  # ruby/setup-ruby does not export it, so the test was false on every entry and
+  # rubocop had never once run in this repository: the step reported green with
+  # no output at all. It also cannot live in the matrix: Gemfile.lock is
+  # gitignored, so each Ruby re-resolves and lands on a different rubocop
+  # (1.28 on Ruby 2.5, 1.91 on 3.4), and no single .rubocop_todo.yml is valid
+  # for both.
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+
+      - name: Rubocop
+        run: bundle exec rubocop
+
   test:
     strategy:
-      # One job's failure must not cancel the other seven. Without this, a single
-      # red entry reports as 1 FAILURE + 7 CANCELLED and the true state of every
-      # other Ruby is unknowable — which is how a ruby-head native-extension
+      # One job's failure must not cancel the others. Without this, a single
+      # red entry reports as 1 FAILURE + N CANCELLED and the true state of every
+      # other Ruby is unknowable, which is how a ruby-head native-extension
       # break and an unrelated YARD lint failure both read as "CI is red" with
       # nothing to distinguish them (2026-08-02 to 2026-09-08).
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        ruby: [2.5, 2.6, 2.7, 3.0, 3.1, head, jruby, jruby-head]
+        # 3.2, 3.3 and 3.4 were missing until 2026-09-20: the fleet runs Ruby
+        # 3.4, so the Ruby this gem actually ships on was the one Ruby it never
+        # tested. 2.5 through 3.1 stay because the gemspec still declares
+        # `required_ruby_version >= 2.5`.
+        #
+        # JRuby is gone, on purpose. `rbtree-jruby` 0.2, the JRuby half of the
+        # gemspec's RBTree dependency, is a Java extension that JRuby 10.1
+        # refuses to load at all: `ClassFormatError: Duplicate method name
+        # "call" ... in class file rbtree/ext/MultiRBTree$INVOKER$i$op_aset`,
+        # raised while requiring spec_helper, so 0 examples ran on jruby and
+        # jruby-head. The fix is a new rbtree-jruby release or a different
+        # sorted-map dependency, neither of which is ours, and nothing in the
+        # fleet runs JRuby. `rake jruby:gem` still builds the JRuby variant of
+        # the gem; it is simply no longer covered here.
+        ruby: ['2.5', '2.6', '2.7', '3.0', '3.1', '3.2', '3.3', '3.4', 'head']
 
     runs-on: ${{ matrix.os }}
+    # ruby-head is a moving preview: it can go red for a change in Ruby itself
+    # that says nothing about this gem. Its result is still reported on every
+    # run, it just cannot turn the whole workflow red and hide a regression in
+    # a Ruby the fleet actually deploys on.
+    continue-on-error: ${{ matrix.ruby == 'head' }}
 
     steps:
-      - uses: actions/checkout@v3
-
-      # JRuby 10 is compiled for Java 21 and the runner image ships 17, so the
-      # JVM refuses its main class before any Ruby runs (UnsupportedClassVersion
-      # Error, class file version 65 vs 61). MRI jobs skip this step.
-      - uses: actions/setup-java@v4
-        if: startsWith(matrix.ruby, 'jruby')
-        with:
-          distribution: temurin
-          java-version: '21'
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
-
-      - name: Rubocop lint
-        run: if [[ "$RUBY_ENGINE" == "ruby" ]]; then bundle exec rubocop; fi
 
       - name: YARD lint
         run: |
@@ -48,15 +80,15 @@ jobs:
       - name: Display Ruby version
         run: ruby -v
 
-      # `if` so the suite runs even when an earlier step failed. The lint steps
-      # above run first (they are cheap and fail fast), but they must never be
-      # able to HIDE test signal: a single unresolvable YARD doc link took this
-      # workflow down on 2026-08-02 and, because the Test step sits after it,
-      # the specs did not execute on main or on ANY pull request for five weeks
-      # (found 2026-09-08). Three gems the whole fleet git-sources had no test
-      # coverage running, and three dependabot PRs looked red for a reason that
-      # had nothing to do with them. The job still FAILS on a lint failure —
-      # strictness is not the problem — but the results are always reported.
+      # `if` so the suite runs even when an earlier step failed. YARD runs first
+      # (it is cheap and fails fast), but it must never be able to HIDE test
+      # signal: a single unresolvable YARD doc link took this workflow down on
+      # 2026-08-02 and, because the Test step sits after it, the specs did not
+      # execute on main or on ANY pull request for five weeks (found
+      # 2026-09-08). Three gems the whole fleet git-sources had no test coverage
+      # running, and three dependabot PRs looked red for a reason that had
+      # nothing to do with them. The job still FAILS on a lint failure,
+      # strictness is not the problem, but the results are always reported.
       # `success() || failure()` rather than `always()`: skip on cancellation.
       - name: Test
         if: success() || failure()

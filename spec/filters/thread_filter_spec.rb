@@ -17,12 +17,27 @@ RSpec.describe Celerbrake::Filters::ThreadFilter do
   describe "thread variables" do
     shared_examples "expected thread variable" do |var|
       it "attaches the thread variable" do
+        retained = nil
+
         new_thread do |th|
           th.thread_variable_set(:bingo, var)
+
+          # Ruby 4.1 drops a thread variable that is set to nil, the way
+          # Thread#[]= always has, so on that Ruby there is nothing for the
+          # filter to attach. The filter's contract is to report what the
+          # thread actually holds, so ask the thread instead of assuming.
+          retained = th.thread_variables.include?(:bingo)
+
           thread_filter.call(notice)
         end
 
-        expect(notice[:params][:thread][:thread_variables][:bingo]).to eq(var)
+        thread_variables = notice[:params][:thread][:thread_variables]
+
+        if retained
+          expect(thread_variables[:bingo]).to eq(var)
+        else
+          expect(thread_variables).to be_nil
+        end
       end
     end
 
