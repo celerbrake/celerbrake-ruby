@@ -3,6 +3,15 @@ Celerbrake Ruby Changelog
 
 ### master
 
+- **Backtrace frames no longer come out quoted on Ruby 3.4.** Ruby 3.4
+  replaced the opening backtick in a backtrace line with a single quote and
+  started qualifying the label with its owner
+  (`:in 'User#magic'`, not ``:in `magic'``). `Backtrace::Patterns::RUBY`
+  still required the backtick, so every frame on Ruby 3.4 fell through to the
+  generic fallback, which captures the quotes as part of the name: every
+  `function` in every notice read `"'User#magic'"`. The fleet runs Ruby 3.4,
+  so this affected every error reported by every app. Found while adding
+  3.2 to 3.4 to CI.
 - **CI runs on the Ruby the fleet deploys.** The test matrix had no 3.2, 3.3 or
   3.4 entry, so the Ruby this gem actually ships on was the one Ruby it never
   tested. All three added.

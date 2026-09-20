@@ -25,6 +25,32 @@ RSpec.describe Celerbrake::Backtrace do
       end
     end
 
+    context "Ruby 3.4 backtrace" do
+      # Ruby 3.4 replaced the opening backtick with a single quote and started
+      # qualifying the label with its owner. Before the RUBY pattern accepted
+      # both, every frame on Ruby 3.4 fell through to the GENERIC pattern,
+      # which captured the quotes as part of the name ("'User#magic'").
+      let(:ruby34_bt) do
+        ["/srv/app/models/user.rb:13:in 'User#magic'",
+         "/srv/app/controllers/users_controller.rb:8:in 'UsersController#index'",
+         "/srv/app/jobs/sync_job.rb:4:in 'block (2 levels) in <top (required)>'"]
+      end
+
+      let(:ex) { CelerbrakeTestError.new.tap { |e| e.set_backtrace(ruby34_bt) } }
+
+      let(:parsed_backtrace) do
+        [{ file: "/srv/app/models/user.rb", line: 13, function: "User#magic" },
+         { file: "/srv/app/controllers/users_controller.rb", line: 8,
+           function: "UsersController#index" },
+         { file: "/srv/app/jobs/sync_job.rb", line: 4,
+           function: "block (2 levels) in <top (required)>" }]
+      end
+
+      it "returns a properly formatted array of hashes" do
+        expect(described_class.parse(ex)).to eq(parsed_backtrace)
+      end
+    end
+
     context "Windows backtrace" do
       let(:windows_bt) do
         ["C:/Program Files/Server/app/models/user.rb:13:in `magic'",

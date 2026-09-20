@@ -16,12 +16,19 @@ module Celerbrake
     module Patterns
       # @return [Regexp] the pattern that matches standard Ruby stack frames,
       #   such as ./spec/notice_spec.rb:43:in `block (3 levels) in <top (required)>'
+      #   or, from Ruby 3.4 on, ./spec/notice_spec.rb:43:in 'Klass#method'
+      # @note Ruby 3.4 replaced the opening backtick with a single quote and
+      #   started qualifying the label with its owner. Until this accepted
+      #   both, every frame on Ruby 3.4 fell through to {GENERIC}, whose
+      #   fallback branch captures the quotes as part of the name: every
+      #   function in every notice came out as "'Klass#method'". The fleet
+      #   runs Ruby 3.4.
       RUBY = %r{\A
-        (?<file>.+)       # Matches './spec/notice_spec.rb'
+        (?<file>.+)         # Matches './spec/notice_spec.rb'
         :
-        (?<line>\d+)      # Matches '43'
+        (?<line>\d+)        # Matches '43'
         :in\s
-        `(?<function>.*)' # Matches "`block (3 levels) in <top (required)>'"
+        [`'](?<function>.*)' # Matches "`block (3 levels) in <top (required)>'"
       \z}x.freeze
 
       # @return [Regexp] the pattern that matches JRuby Java stack frames, such
