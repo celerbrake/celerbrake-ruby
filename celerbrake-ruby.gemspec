@@ -43,7 +43,7 @@ DESC
   s.add_dependency 'logger', '~> 1.0'
 
   s.add_development_dependency 'rspec', '~> 3'
-  s.add_development_dependency 'rspec-its', '~> 1.2'
+  s.add_development_dependency 'rspec-its', '~> 2.0'
   s.add_development_dependency 'rake', '~> 13'
   s.add_development_dependency 'pry', '~> 0'
   s.add_development_dependency 'webmock', '~> 3.8'
